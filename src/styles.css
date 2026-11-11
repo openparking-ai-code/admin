@@ -1,0 +1,2140 @@
+/* Colours, radii, shadows and type. The day colours are the Open Parking AI
+   site's own, exactly; night is derived from the same three -- ink as the
+   base, paper as the text, gold as the accent. Night is applied by setting
+   data-theme="night" on the root element (see src/theme.js).
+
+   The layout uses the role names below (--bg-*, --text-*), which point at
+   the site's names. Every text colour is var(--text-primary) or
+   var(--text-secondary), and scripts/check-contrast.js measures both against
+   every background, in both looks. A new text colour has to be added there or
+   that check fails.
+
+   The site's gold-deep measures under 4.5 : 1 on its own paper, so by day it
+   carries no text here except the ".ai" of the wordmark, which is the logo
+   (see NOT_TEXT in scripts/check-contrast.js). */
+:root {
+  /* The site, exactly. */
+  --ink: #0e0c09;
+  --paper: #f9f6f0;
+  --paper-2: #f2ede3;
+  --paper-3: #eae3d5;
+  --gold: #b8975a;
+  --gold-deep: #8a6f3e;
+  --gold-pale: rgba(184, 151, 90, 0.1);
+  --border: rgba(14, 12, 9, 0.1);
+  --border-mid: rgba(14, 12, 9, 0.18);
+  --ink-soft: rgba(14, 12, 9, 0.62);
+  --ink-softer: rgba(14, 12, 9, 0.4);
+
+  /* Roles. */
+  --bg-page: var(--paper);
+  --bg-panel: var(--paper-2);
+  --bg-raised: var(--paper);
+  --bg-sunken: var(--paper-3);
+  --accent: var(--gold);
+  --accent-soft: var(--gold-pale);
+  /* Gold itself is under 3 : 1 on paper, too faint to show focus by day. */
+  --focus: var(--gold-deep);
+  --wordmark-end: var(--gold-deep);
+  --mark-tile: transparent;
+  --text-primary: var(--ink);
+  --text-secondary: var(--ink-soft);
+  /* a field that is missing or wrong -- its sentence, and its frame. */
+  --text-wrong: #a3201b;
+  --line-wrong: #c62828;
+  --border-1: var(--border);
+  --border-2: var(--border-mid);
+  --backdrop: rgba(14, 12, 9, 0.4);
+
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow: 0 1px 2px rgba(14, 12, 9, 0.04), 0 4px 16px rgba(14, 12, 9, 0.05);
+  --shadow-hover: 0 4px 10px rgba(14, 12, 9, 0.08), 0 12px 32px rgba(14, 12, 9, 0.08);
+
+  --font-serif: 'DM Serif Display', Georgia, serif;
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  color-scheme: light;
+}
+
+:root[data-theme='night'] {
+  --bg-page: #0e0c09;
+  --bg-panel: #17140f;
+  --bg-raised: #1f1b15;
+  --bg-sunken: #2a251d;
+  --accent: #b8975a;
+  --accent-soft: rgba(184, 151, 90, 0.16);
+  --focus: #b8975a;
+  --wordmark-end: #b8975a;
+  /* The mark's ink faces are the site's ink and would vanish on an ink page;
+     at night the mark sits on a paper tile instead. The mark is unchanged. */
+  --mark-tile: #f9f6f0;
+  --text-primary: #f9f6f0;
+  --text-secondary: rgba(249, 246, 240, 0.66);
+  --text-wrong: #ff9e94;
+  --line-wrong: #ff7b6e;
+  --border-1: rgba(249, 246, 240, 0.1);
+  --border-2: rgba(249, 246, 240, 0.18);
+  /* Shadows and the dimmed background are the site's ink, as by day. Ink
+     cannot darken the ink page itself; it shows where it falls on a panel. */
+  --backdrop: rgba(14, 12, 9, 0.72);
+  --shadow: 0 1px 2px rgba(14, 12, 9, 0.5), 0 4px 16px rgba(14, 12, 9, 0.5);
+  --shadow-hover: 0 4px 10px rgba(14, 12, 9, 0.6), 0 12px 32px rgba(14, 12, 9, 0.6);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+ul {
+  list-style: none;
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ── The frame ─────────────────────────────────────────────────────────── */
+.shell {
+  display: flex;
+  min-height: 100%;
+  min-width: 960px;
+}
+.sidebar {
+  width: 256px;
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-1);
+  padding: 20px 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 10px 22px;
+}
+.brand-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: var(--mark-tile);
+  flex-shrink: 0;
+}
+.brand-mark svg {
+  width: 34px;
+  height: 34px;
+}
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1;
+}
+.brand-name {
+  font-family: var(--font-serif);
+  font-size: 21px;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.brand-name i {
+  font-style: italic;
+  color: var(--wordmark-end);
+}
+.brand-tagline {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 400;
+  position: relative;
+}
+.nav-item:hover {
+  background: var(--bg-sunken);
+  color: var(--text-primary);
+}
+.nav-item[aria-current='page'] {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.nav-item[aria-current='page']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.nav-item[aria-current='page'] .icon {
+  stroke: var(--accent);
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 16px 28px;
+  background: var(--bg-page);
+  border-bottom: 1px solid var(--border-1);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+/* The language and the look: on Settings and the sign-in screen only. */
+.choosers {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+/* A chooser: its name, its description under it, then its choices. */
+.chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chooser > .field-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.chooser > .field-about {
+  max-width: 28ch;
+  margin-top: 0;
+}
+.chooser > .segmented {
+  align-self: flex-start;
+}
+.content {
+  padding: 28px 28px 60px;
+}
+.page-title {
+  font-family: var(--font-serif);
+  font-size: 34px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+.page-purpose {
+  color: var(--text-secondary);
+  font-size: 16px;
+  margin-top: 8px;
+  max-width: 680px;
+}
+
+/* ── Day / night / auto, and language ──────────────────────────────────── */
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+}
+.segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+}
+.segment .icon {
+  width: 13px;
+  height: 13px;
+}
+.segment:hover {
+  color: var(--text-primary);
+}
+.segment[aria-checked='true'] .icon {
+  stroke: var(--accent);
+}
+.segment[aria-checked='true'] {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow);
+}
+
+/* ── Quick Find ────────────────────────────────────────────────────────── */
+.find-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  /* Narrower before it wraps its words: the choosers beside it carry descriptions now. */
+  flex: 0 1 360px;
+  min-width: 220px;
+  white-space: nowrap;
+  padding: 9px 10px 9px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 15px;
+  cursor: pointer;
+  text-align: left;
+}
+.find-pill:hover {
+  box-shadow: var(--shadow);
+}
+.find-pill-text {
+  flex: 1;
+}
+.find-kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-1);
+  color: var(--text-secondary);
+}
+.find-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 50;
+}
+.find-dialog {
+  width: 600px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-hover);
+  overflow: hidden;
+}
+.find-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-1);
+  color: var(--text-secondary);
+}
+.find-input-row .icon {
+  width: 20px;
+  height: 20px;
+}
+.find-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: none;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+.find-input::placeholder {
+  color: var(--text-secondary);
+}
+/* Quick Find's description, under the typing line. */
+.find-about {
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border-1);
+}
+.find-about .field-about {
+  max-width: none;
+  margin-top: 0;
+}
+.find-results {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+.find-group + .find-group {
+  border-top: 1px solid var(--border-1);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.find-group-heading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 6px 18px 4px;
+}
+.find-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 8px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.find-option .icon {
+  color: var(--text-secondary);
+}
+.find-option[aria-selected='true'] {
+  background: var(--accent-soft);
+}
+.find-option[aria-selected='true'] .icon {
+  stroke: var(--accent);
+}
+.find-nothing {
+  padding: 22px 18px;
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+.find-hint {
+  padding: 10px 18px;
+  border-top: 1px solid var(--border-1);
+  background: var(--bg-panel);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ── Signing in ────────────────────────────────────────────────────────── */
+.checking {
+  min-height: 100vh;
+  background: var(--bg-page);
+}
+.signin-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-page);
+}
+.signin-top {
+  align-self: stretch;
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 28px;
+}
+/* on a phone the two choosers go one under the other, never off the screen's edge. */
+.signin-top .choosers {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+.signin-card {
+  width: 420px;
+  /* never wider than the screen, less its margins: invite and reset emails are opened on phones. */
+  max-width: calc(100% - 32px);
+  margin: 48px 16px;
+  padding: 32px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow);
+}
+.signin-brand {
+  margin-bottom: 24px;
+}
+.signin-problem {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+}
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 24px;
+}
+/* good news on a signed-out screen (a password changed, a link on its way), and the small links under a form. */
+.signin-said {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+}
+.signin-more {
+  margin-top: 18px;
+  font-size: 14px;
+}
+/* a link that no longer works: its sentence, the one thing to do, and the button for it. */
+.link-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  /* The title's gap to its next line, as on every signed-out screen (.page-purpose). */
+  margin-top: 8px;
+}
+.link-status .signin-problem,
+.link-status .signin-said {
+  align-self: stretch;
+  margin-top: 0;
+}
+/* an email breaks before its @ (src/parts.jsx Email), and inside a part only if it must. */
+.link-status .signin-said {
+  overflow-wrap: anywhere;
+}
+.link-do {
+  margin: 0;
+}
+/* the invited email, shown and not typed: no fill, a dashed edge. */
+.field input[readonly],
+.field .shown-value {
+  background: transparent;
+  border-style: dashed;
+}
+/* An input is one line, so a long address is shown as text that wraps, the
+   input kept for the browser's password keeper, out of sight. */
+.field .shown-value {
+  padding: 10px 12px;
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
+}
+.field input.kept-out-of-sight {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.signin-form .warning {
+  margin: 0;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field > .field-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.field input {
+  padding: 10px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.primary-button {
+  padding: 11px 16px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+}
+.primary-button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+/* ── The owner, in the frame ───────────────────────────────────────────── */
+.topbar-owner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+}
+.garage-current {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.link-button {
+  white-space: nowrap;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ── Pages with figures ────────────────────────────────────────────────── */
+.panel {
+  margin-top: 24px;
+  padding: 20px 22px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+}
+.home-grid {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 0 20px;
+  align-items: start;
+}
+.section-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+.quiet {
+  color: var(--text-secondary);
+}
+.figure {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  line-height: 1.2;
+}
+.inside-counts {
+  margin-bottom: 8px;
+}
+.lane-list > li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+  font-size: 14px;
+  border-top: 1px solid var(--border-1);
+}
+.lane-list > li:first-child {
+  border-top: none;
+}
+.lane-name {
+  font-weight: 600;
+  min-width: 120px;
+}
+.tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+}
+.lane-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--text-secondary);
+}
+.lane-row[data-state='working'] .dot {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.problem-note {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+}
+.garage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.garage-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+}
+.garage-choice:hover {
+  background: var(--accent-soft);
+}
+.garage-choice-name {
+  font-weight: 600;
+}
+/* Home's garages, each with its one line; the one shown below is marked. */
+.home-garages {
+  gap: 6px;
+}
+.home-garages .garage-line {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.garage-choice[aria-current='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.home-detail-title {
+  margin-top: 24px;
+  font-family: var(--font-serif);
+  font-size: 24px;
+  font-weight: 400;
+}
+.home-detail .home-grid > .panel {
+  margin-top: 12px;
+}
+.settings .choosers {
+  flex-direction: column;
+  gap: 18px;
+}
+.list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.list-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.list-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 16px;
+}
+.list-buttons .link-button:disabled {
+  cursor: progress;
+}
+.list-actions .problem-note {
+  max-width: 48ch;
+}
+.list {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  /* compact, so a list of a few hundred reads as a list. */
+  font-size: 14px;
+  line-height: 1.35;
+}
+.list th {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  text-align: left;
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--border-2);
+  /* Names in one line across the top, whatever the length of the description under each. */
+  vertical-align: top;
+}
+.list th .field-about {
+  font-size: 11px;
+}
+.list td {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--border-1);
+  vertical-align: top;
+}
+/* A date and time on one line. */
+.list td[data-time] {
+  white-space: nowrap;
+}
+/* a row off this page of the list. Only the screen leaves it out: a print holds every row. */
+@media screen {
+  .off-page,
+  .print-only {
+    display: none !important;
+  }
+}
+.pager {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 14px;
+}
+.pager .link-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  text-decoration: none;
+}
+.pager-where {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+/* the choices above a list that can be sorted and chosen from: small,
+   on one line, each with its description; the ticks open under their button. */
+.list-choose {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 24px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+.choose-field {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.choose-field > .field-name {
+  font-weight: 600;
+}
+.choose-field > .field-about {
+  font-size: 11px;
+  max-width: 30ch;
+}
+.choose-field select,
+.choose-open {
+  margin-top: 4px;
+  max-width: 30ch;
+  padding: 3px 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.choose-open {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  cursor: pointer;
+}
+.choose-ticks {
+  position: absolute;
+  z-index: 5;
+  top: 100%;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  max-width: min(60ch, 80vw);
+  margin-top: 4px;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-hover);
+}
+.choose-tick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.choose-tick:hover {
+  background: var(--accent-soft);
+}
+.choose-tick .tick-box {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+.choose-open:focus-visible,
+.choose-tick:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.choose-clear {
+  padding-bottom: 4px;
+  font-size: 13px;
+}
+/* a refused attempt is one line a row on screen. Who, what was tried
+   and why are cut short with "…", and shown whole over the row while the
+   pointer is on them or they have the keyboard's focus. On paper, whole. */
+/* The two times as wide as the longest ("Dec 12, 2026, 12:56 PM"), the count
+   as its heading; who a little less than what and why, which share the rest. */
+.list.refused {
+  table-layout: fixed;
+}
+.list.refused th:nth-child(1),
+.list.refused th:nth-child(6) {
+  width: 172px;
+}
+.list.refused th:nth-child(2) {
+  width: 15%;
+}
+.list.refused th:nth-child(5) {
+  width: 84px;
+}
+.list .cut {
+  position: relative;
+}
+.cut-text {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.list .cut:focus {
+  outline: none;
+}
+@media screen {
+  .list .cut:hover > .cut-text,
+  .list .cut:focus > .cut-text {
+    position: absolute;
+    z-index: 4;
+    top: 0;
+    left: -7px;
+    width: max-content;
+    min-width: calc(100% + 7px);
+    max-width: min(56ch, 80vw);
+    padding: 3px 6px;
+    white-space: normal;
+    overflow: visible;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-2);
+    border-radius: 6px;
+    box-shadow: var(--shadow-hover);
+  }
+  .list .cut:focus-visible > .cut-text {
+    outline: 2px solid var(--focus);
+  }
+}
+@media print {
+  .cut-text {
+    overflow: visible;
+    white-space: normal;
+  }
+}
+/* a form's Cancel at its right, as on every form: Getting paid's head
+   is inside its form's column, which would hold it to its words' width. */
+.setup-form > .lane-panel-head {
+  align-self: stretch;
+}
+.opens {
+  margin-top: 16px;
+}
+.device-name {
+  font-weight: 600;
+}
+.print-head {
+  display: none;
+}
+/* A field's description: directly under its name, always shown, printed. */
+.field-name,
+.field-about {
+  display: block;
+}
+.field-about {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  max-width: 34ch;
+}
+/* A word of care under a field's box, after what is typed: shown, never behind a pointer. */
+.field-hint {
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  max-width: 48ch;
+}
+
+/* ── Printing a list: the browser's own print, plain dark text, no frame ── */
+/* ── Setup: the checklist, lane setup, the change log ─────────────── */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+.setup-open {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.setup-count {
+  color: var(--text-secondary);
+}
+.setup-steps {
+  list-style: none;
+  margin-top: 8px;
+}
+.setup-step {
+  padding: 16px 0;
+  border-top: 1px solid var(--border-1);
+}
+.setup-step:first-child {
+  border-top: none;
+}
+.setup-step-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.setup-step-name {
+  display: flex;
+  flex-direction: column;
+  font-size: 17px;
+}
+.setup-state {
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+}
+.setup-state.is-done {
+  background: var(--accent-soft);
+}
+.setup-facts {
+  margin-top: 8px;
+}
+.setup-where {
+  margin-top: 6px;
+}
+.setup-where a,
+.page-link {
+  color: var(--text-primary);
+  text-underline-offset: 3px;
+}
+.setup-question,
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+}
+.setup-form .field {
+  width: 100%;
+  max-width: 44ch;
+}
+.setup-form textarea,
+.setup-form select,
+.setup-form input[type='text'],
+.setup-form input[type='date'] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+/* a tax list, the lines of a new one, and a payment account's facts. */
+.tax-list + .tax-list {
+  margin-top: 18px;
+}
+.tax-when {
+  margin: 10px 0 8px;
+}
+.tax-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tax-line {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+}
+.tax-line-name {
+  margin: 0;
+  font-weight: 600;
+}
+.tax-line-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+.setup-form .tax-line-fields .field {
+  width: auto;
+  flex: 1 1 22ch;
+}
+.paid-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 16px 0;
+}
+.paid-value {
+  font-weight: 600;
+}
+.setup-form .field > .field-name,
+.setup-question .chooser > .field-name {
+  font-weight: 600;
+}
+.lane-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.lane-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.warning {
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-2);
+  background: var(--accent-soft);
+  max-width: 60ch;
+}
+.warning .primary-button {
+  margin-top: 10px;
+}
+/* the people to tell, and who gets which alert. */
+.setup-form input[type='tel'] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.alert-cell {
+  max-width: 34ch;
+}
+.alert-name,
+.alert-says {
+  display: block;
+}
+.alert-name {
+  font-weight: 600;
+}
+.alert-says {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+/* item 12: a locked tick is greyed, with its reason beside it, and never a
+   wait cursor (a "blue spin" read as busy, and the owner could not tell why). */
+.tick:disabled {
+  cursor: not-allowed;
+}
+.tick:disabled .tick-box {
+  border-color: var(--border-2);
+  background: var(--bg-sunken);
+}
+.tick-box {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--text-secondary);
+  border-radius: 4px;
+}
+.tick-box[data-on='yes'] {
+  background: var(--text-primary);
+  border-color: var(--text-primary);
+  box-shadow: inset 0 0 0 3px var(--bg-panel);
+}
+.print-word {
+  display: none;
+}
+.tick:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.connection-code {
+  display: block;
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  word-break: break-all;
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+  user-select: all;
+}
+.primary-button .icon {
+  vertical-align: -3px;
+}
+.lane-closed .tag,
+.tag-refused {
+  display: inline-block;
+  margin-bottom: 2px;
+}
+.list.changes .is-refused td {
+  background: var(--accent-soft);
+}
+
+@media print {
+  :root,
+  :root[data-theme] {
+    --text-primary: #000;
+    --text-secondary: #000;
+    --border-1: #000;
+    --border-2: #000;
+  }
+  html,
+  body,
+  .shell,
+  .main,
+  .content,
+  .panel {
+    background: none;
+    box-shadow: none;
+  }
+  /* A row is never split across two sheets: its words read together. */
+  tr {
+    break-inside: avoid;
+  }
+  /* Nor a setup step: its name and whether it is done read together. */
+  .setup-step {
+    break-inside: avoid;
+  }
+  /* A print leaves backgrounds out by default, so on paper no state is a
+     background or a colour alone: each is a mark or a word. A list prints
+     its own name (the refused attempts are told apart by it), a tick prints
+     as a word, and of a row of choices only the one chosen prints. */
+  .sidebar,
+  .topbar,
+  .page-title,
+  .page-purpose,
+  .no-print,
+  .tick-box,
+  .segment[aria-checked='false'] {
+    display: none;
+  }
+  .print-word {
+    display: inline;
+  }
+  .segmented {
+    border: none;
+    padding: 0;
+  }
+  .shell {
+    min-width: 0;
+  }
+  .content,
+  .panel {
+    padding: 0;
+    margin: 0;
+    border: none;
+  }
+  .print-head {
+    display: block;
+    margin-bottom: 16px;
+  }
+  .print-garage {
+    font-size: 20px;
+    font-weight: 600;
+  }
+}
+
+/* the lanes' screens. A lane picked, a price switched on, and the
+   message shown the way the screen at the lane shows it: capitals, in
+   lines, nothing cut off. */
+.board-prices {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+/* A tick with its words beside it (a lane's price, a lane picked for a message):
+   as wide as its words, not the 28px of a tick alone in a list cell. Before an earlier change
+   the words were squeezed into that width, one word to a line, over the text below. */
+.board-prices .tick {
+  width: auto;
+  height: auto;
+  min-height: 28px;
+  gap: 8px;
+  justify-content: flex-start;
+  text-align: left;
+  color: var(--text-primary);
+}
+.board-prices .tick-box {
+  flex-shrink: 0;
+}
+
+/* every tick on the Rates form that has words (a special's days, the
+   most per day and per week, grace, the owner's confirmation) is drawn the same
+   way, and may wrap its words but never squeeze them. Before, they were 28px
+   wide: one word to a line, over the fields below, and a press on Friday
+   landed on Saturday's words. */
+.tick.tick-words {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  min-height: 28px;
+  gap: 8px;
+  justify-content: flex-start;
+  text-align: left;
+  color: var(--text-primary);
+  font: inherit;
+}
+.tick.tick-words .tick-box {
+  flex-shrink: 0;
+}
+.day-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+[data-section='confirm'] .tick.tick-words {
+  display: flex;
+  margin-bottom: 8px;
+}
+[data-list='board-prices'] {
+  margin-top: 14px;
+}
+
+.screen-preview {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  background: var(--bg-sunken);
+  color: var(--text-primary);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-md);
+}
+
+.screen-line {
+  white-space: pre;
+}
+
+/* the installer drawings. On screen, the page says what the set holds;
+   the sheets themselves are drawn only to be printed, each on a sheet of
+   its own, 11 x 17 in landscape (a printer with only Letter scales it). */
+.drawings-every-way {
+  font-weight: 600;
+}
+.drawings-list-title {
+  margin: 18px 0 6px;
+  font-size: 15px;
+}
+.drawings-list {
+  margin: 0;
+  padding-left: 22px;
+}
+.drawings-about {
+  margin-top: 14px;
+  font-size: 14px;
+}
+/* each sheet in the list with its own View, Download PDF and Print,
+   at the end of its line; one sheet viewed over the page, as it prints. */
+.drawings-list li {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-1);
+}
+.drawing-name {
+  margin-right: 18px;
+}
+.drawing-actions {
+  float: right;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-left: 12px;
+  font-size: 14px;
+}
+.drawings-list li::after {
+  content: '';
+  display: block;
+  clear: both;
+}
+.drawing-actions .link-button:disabled {
+  cursor: progress;
+}
+.sheet-view-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 3vh 16px;
+  overflow: auto;
+  background: var(--backdrop);
+}
+.sheet-view {
+  width: min(1400px, 100%);
+  padding: 14px 16px 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-hover);
+}
+.sheet-view-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.drawing-viewed {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(94vh - 70px);
+  font-family: 'DM Sans', sans-serif;
+  border: 1px solid var(--border-2);
+}
+.drawings-print {
+  display: none;
+}
+@page drawings {
+  size: 17in 11in;
+  margin: 0;
+}
+@media print {
+  .drawings-print {
+    display: block;
+    page: drawings;
+  }
+  .drawing-sheet {
+    display: block;
+    width: 17in;
+    height: 11in;
+    break-after: page;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .drawing-sheet:last-child {
+    break-after: auto;
+  }
+}
+/* the Garages page. A row is pressed as a whole; its name is the button for the keyboard. */
+.list.garages tbody tr {
+  cursor: pointer;
+}
+.list.garages tbody tr:hover,
+.list.garages tbody tr[aria-current='true'] {
+  background: var(--accent-soft);
+}
+.list.garages td:not(:first-child) {
+  white-space: nowrap;
+}
+/*
+ * the name keeps room for a few words on one line, in Spanish too; a
+ * long time zone wraps in its own column instead of squeezing the name.
+ */
+.list.garages th:first-child,
+.list.garages td:first-child {
+  min-width: 15em;
+}
+.list.garages td[data-zone] {
+  white-space: normal;
+  min-width: 12em;
+}
+.garage-open {
+  font-weight: 600;
+  text-align: left;
+  white-space: normal;
+}
+/* an account with no garage yet, on every page. */
+.no-garages {
+  margin-top: 20px;
+}
+/* Add a garage's check step: the three answers, then what cannot be changed. */
+.garage-answers {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+.garage-answers dd {
+  margin: 4px 0 0;
+  font-weight: 600;
+}
+.garage-check .warning {
+  margin-bottom: 14px;
+}
+
+/* a banned car's pictures, small, side by side. */
+.banned-pictures {
+  white-space: nowrap;
+}
+.banned-picture {
+  display: inline-block;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* ── the Rates page from the owner's walk ────────────────────────── */
+/* Item 1: every section of the form in a whole frame. A fieldset's own frame
+   is broken where its legend sits; a floated legend is a plain first line
+   inside the frame instead, so the top line is unbroken and the title and its
+   description sit inside, with room to the edge. */
+.rates-part {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.rates-part > legend,
+fieldset.days > legend,
+fieldset.dates > legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 0;
+}
+.rates-part > legend + *,
+fieldset.days > legend + *,
+fieldset.dates > legend + * {
+  clear: both;
+}
+.rates-part > * + * {
+  margin-top: 10px;
+}
+.rates-part > legend .field-name,
+fieldset.days > legend .field-name,
+fieldset.dates > legend .field-name {
+  display: block;
+  font-weight: 600;
+}
+.rates-part > legend .field-about,
+fieldset.days > legend .field-about,
+fieldset.dates > legend .field-about {
+  display: block;
+}
+fieldset.days,
+fieldset.dates {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+fieldset.dates > * + * {
+  margin-top: 8px;
+}
+/* Item 4: a field that is missing or wrong, in a red frame with its sentence under it. */
+.field[data-wrong='yes'] select,
+.field[data-wrong='yes'] .unit-box,
+.field[data-wrong='yes'] .when-box input {
+  border: 2px solid var(--line-wrong);
+}
+fieldset.days[data-wrong='yes'],
+fieldset.dates[data-wrong='yes'],
+.chooser[data-wrong='yes'] {
+  outline: 2px solid var(--line-wrong);
+  outline-offset: 6px;
+  border-radius: 2px;
+}
+.field-wrong {
+  display: block;
+  color: var(--text-wrong);
+  font-weight: 600;
+  font-size: 14px;
+}
+.missing ul {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* Item 9: a number's unit inside its box. */
+.unit-box {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.setup-form .unit-box input[type='text'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+}
+.unit {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.unit-before {
+  padding-left: 12px;
+}
+.unit-after {
+  padding-right: 12px;
+}
+/* Item 10: the value in force, beside a field that starts empty. */
+.now-was {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+/* Item 5: a date or time box is empty until picked -- a plain prompt, never the
+   browser's grey digits, which look like a value that is not there. */
+.when-box {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+.setup-form .when-box input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+}
+.when-box[data-empty='yes'] input:not(:focus),
+.when-box[data-empty='yes'] input:not(:focus)::-webkit-datetime-edit {
+  color: transparent;
+}
+.when-prompt {
+  display: none;
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--text-secondary);
+}
+.when-box[data-empty='yes'] input:not(:focus) + .when-prompt {
+  display: block;
+}
+.date-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.date-row .when-box {
+  width: auto;
+  flex: 0 1 22ch;
+}
+.unit-box:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.unit-box input:focus-visible {
+  outline: none;
+}
+/* Items 12 and 13: a locked control is greyed, with the next step beside it. */
+.tick-row,
+.act-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.act-row .primary-button:disabled,
+.act-row .link-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tick.tick-words:disabled {
+  color: var(--text-secondary);
+}
+.locked-reason {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+[data-section='confirm'] .tick-row {
+  margin-bottom: 10px;
+}
+/* The check page's steps, the one the owner is at marked. */
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: 4px 0 14px;
+  padding: 0;
+  list-style: none;
+}
+.steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+.steps li[data-current='yes'] {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border-2);
+  font-size: 13px;
+}
+.steps li[data-current='yes'] .step-n {
+  border: 2px solid var(--text-primary);
+  background: var(--accent-soft);
+}
+/* The special rates in force, one under the other; the one being changed opens under its own. */
+.special-list .special-in-force > p {
+  margin: 0;
+}
+.saved-by {
+  margin: 4px 0 8px;
+}
+/* the approved page: the main button of each step dark, the others as every button. */
+.secondary-button {
+  padding: 11px 16px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+}
+[data-section='regular'] .primary-button,
+.special-editor .primary-button,
+[data-section='confirm'] .primary-button {
+  background: var(--text-primary);
+  color: var(--bg-page);
+  border-color: var(--text-primary);
+}
+.secondary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.rates-state {
+  margin: 0;
+}
+.rate-sentences-title {
+  margin: 12px 0 2px;
+}
+.rate-sentences ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rate-sentences ul.small,
+.small {
+  font-size: 13px;
+}
+.rate-plan {
+  border-top: 1px solid var(--border-1);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.rate-plan-when {
+  font-weight: 700;
+  margin: 0;
+}
+/* A note in its own box: what a save does to cars already parked. */
+.rates-note {
+  max-width: 70ch;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+}
+.confirm-notice {
+  border-color: var(--accent);
+}
+/* The two rules of rate setup, by the caps and by the special rates: one sentence a line. */
+.rate-rules p + p {
+  margin-top: 6px;
+}
+.saved-note {
+  margin-top: 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-2);
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+}
+.special-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+.special-list .special-in-force {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+}
+.special-words {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.special-words > .special-name {
+  display: block;
+}
+[data-section='specials'] > .act-row,
+[data-section='specials'] > .special-editor {
+  margin-top: 14px;
+}
+/* What changes: the old value struck through, then the new. */
+.change-grid {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+.change-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 4px 12px;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+}
+.change-was {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+}
+.change-is {
+  font-weight: 700;
+}
+.change-arrow {
+  color: var(--text-secondary);
+}
+.calc-fields {
+  align-items: flex-end;
+}
+.tried-pays {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 2px 0;
+}
+.tried-total td {
+  border-top: 1px solid var(--border-2);
+}
+.table-scroll {
+  overflow-x: auto;
+}
+.price-table tr.added-row td {
+  background: var(--accent-soft);
+}
+.steps li[data-done='yes'] .step-n {
+  background: var(--text-primary);
+  color: var(--bg-page);
+  border-color: var(--text-primary);
+}
+@media screen and (max-width: 720px) {
+  .change-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .change-arrow {
+    display: none;
+  }
+}
+
+/* ── A phone: the frame stacks, nothing is wider than the screen ───── */
+/* Above 720 px the frame is as it was. Below, the pages list sits above the
+   page, wrapping, and a wide list scrolls inside its own panel, never the page. */
+@media screen and (max-width: 720px) {
+  .shell {
+    flex-direction: column;
+    min-width: 0;
+  }
+  .sidebar {
+    width: auto;
+    height: auto;
+    position: static;
+    border-right: none;
+    border-bottom: 1px solid var(--border-1);
+    padding: 12px 16px;
+  }
+  .nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .topbar {
+    position: static;
+    padding: 12px 16px;
+  }
+  .topbar-owner {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+  .garage-current {
+    white-space: normal;
+  }
+  .panel {
+    padding: 16px 14px;
+    overflow-x: auto;
+  }
+  .tax-line-fields,
+  .rate-fields .tax-line-fields {
+    flex-wrap: wrap;
+  }
+  .field input,
+  .field select {
+    max-width: 100%;
+  }
+}
+
+/* ── Extra pages from the host, framed inside a page (src/extras.js) ─────── */
+.extra-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  margin-top: 12px;
+  background: transparent;
+}
+/* A group in the side menu, Setup's or the host's: its row drawn as a page row is (its own
+   icon in the icon column, the same type, the same left edge), with an open/closed chevron at
+   the far end; its pages a step in, a little smaller and lighter. */
+.nav-group-name {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 15px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: start;
+}
+.nav-group-title {
+  flex: 1;
+  min-width: 0;
+}
+.nav-group-chevron {
+  display: inline-flex;
+  margin-inline-start: auto;
+  transition: transform 0.15s ease;
+}
+.nav-group-chevron .icon {
+  width: 14px;
+  height: 14px;
+}
+.nav-group-name[aria-expanded='true'] .nav-group-chevron {
+  transform: rotate(90deg);
+}
+.nav-sub .nav-item {
+  padding-inline-start: 42px;
+  font-size: 14px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.nav-sub .nav-item .icon {
+  width: 16px;
+  height: 16px;
+}
+/* A phone: a group takes its own row, and its pages wrap under its name. */
+@media screen and (max-width: 720px) {
+  .nav-group {
+    flex-basis: 100%;
+  }
+  .nav-sub .nav-item {
+    padding-inline-start: 24px;
+  }
+}
+.extra-note {
+  margin: 4px 0 12px;
+}
+.extra-page .extra-frame {
+  margin-top: 0;
+}
+.extra-section .quiet {
+  margin-bottom: 4px;
+}
+@media print {
+  .extra-frame {
+    display: none;
+  }
+}
+
+/* ── Exceptions (platform 0048): a day of cars let out, and one car's story ── */
+.exceptions-day {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 24px;
+  margin: 12px 0;
+}
+.exceptions-day .lane-actions {
+  padding-bottom: 10px;
+}
+.list.exceptions td[data-who] {
+  overflow-wrap: anywhere;
+}
+.exception-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px 24px;
+  margin: 12px 0 20px;
+}
+.exception-facts dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.story {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+  border-left: 2px solid var(--border-2);
+}
+.story-step {
+  display: grid;
+  grid-template-columns: 9.5em 1fr;
+  gap: 12px;
+  padding: 6px 0 6px 12px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.story-step[data-type='let-out'] {
+  background: var(--accent-soft);
+}
+.story-time {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.story-title {
+  color: var(--text-primary);
+}
+.story-step[data-type='let-out'] .story-title {
+  font-weight: 600;
+}
+.story-body {
+  overflow-wrap: anywhere;
+}
+.story-deliveries {
+  margin: 4px 0 0;
+  padding-inline-start: 18px;
+}
+.story-why {
+  display: block;
+}
+.story-copies ul {
+  margin: 4px 0 12px;
+  padding-inline-start: 18px;
+}
+@media (max-width: 640px) {
+  .story-step {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+.exception-picture-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  list-style: none;
+  margin: 6px 0 16px;
+  padding: 0;
+}
+.exception-picture-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 160px;
+  font-size: 12px;
+}

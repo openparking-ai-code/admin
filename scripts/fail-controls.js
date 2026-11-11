@@ -1,0 +1,3998 @@
+#!/usr/bin/env node
+// Every check, shown failing before its result is read.
+//
+// Each control copies this repository to a scratch folder, plants ONE break
+// there, runs the check, and requires it to FAIL and to name what was planted.
+// The working tree is never edited, so a control cannot leave a break behind
+// or race a check running beside it. A plant whose anchor is not found
+// exactly once refuses to run: a plant that silently changed nothing would
+// make the check look like it caught something it never saw.
+//
+//   node scripts/fail-controls.js            the controls that need no browser
+//   node scripts/fail-controls.js --browser  the ones that do (each builds its copy)
+//   A control may set `env` for its run: the LibreOffice one needs soffice (CI).
+//   ... --only TEXT                          only the controls whose name holds TEXT
+//   ... --plan                               print every control's name, one per line
+//   ... --shard i/N                          run shard i of N; write what ran, what
+//                                            failed and how long each took to
+//                                            fail-controls-<plain|browser>-shard-<i>.json
+//   ... --verify DIR                         read the shard files in DIR: shards 1..N
+//                                            each exactly once, every control run in
+//                                            exactly one of them, none failed
+//
+// Which shard a control lands in is chosen by its measured seconds on CI
+// (scripts/fail-controls-times.json): longest first, each to the shard with
+// the fewest seconds so far. A control with no measured time yet counts as the
+// longest of its kind. The times only balance the shards; which controls run
+// is the list below, whole, and --verify holds every shard to it.
+//
+// The download check's odd-text walk (thousands of cells, most of its minutes)
+// runs only in the controls marked `oddText: true`: the ones whose break is in
+// how text is shown or written. The others run it with --without-odd-text. A
+// control that expects an odd-text line but is not marked refuses to run.
+//
+// The estate-name guard's control is not here: it plants its own, in the same
+// run as its scan (`check-no-sibling-names.js --worktree`).
+
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
+const LEAVE_OUT = new Set(['node_modules', '.git', 'dist', '.screens', 'test-results']);
+
+const CHECK_FILES = ['node', 'scripts/check-files.js'];
+const CHECK_DOWNLOADS = ['node', 'scripts/check-downloads.js'];
+const CHECK_DRAWINGS = ['node', 'scripts/check-drawings.js'];
+const CHECK_CACHE_ORDER = ['node', 'scripts/check-cache-order.js'];
+const TIDY = ['node', 'scripts/check-tidy.js'];
+const CHOICES = ['node', 'scripts/check-choices.js'];
+const GARAGES = ['node', 'scripts/check-garages.js'];
+const INVITES = ['node', 'scripts/check-invites.js'];
+const BUILD = [['npx', 'vite', 'build', '--logLevel', 'error']];
+
+const CONTROLS = [
+  {
+    check: '1 no tech language',
+    plant: { file: 'src/i18n/es.js', anchor: "'Lo que paga un conductor por estacionar aquí:", with: "'Lo que paga un conductor por token:" },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['es: page.rates.purpose: "token"'],
+  },
+  {
+    check: '2 nothing readable outside the dictionaries',
+    plant: { file: 'src/App.jsx', anchor: '<h1 className="page-title">', with: '<h1 className="page-title">Welcome ' },
+    run: ['node', 'scripts/check-readable-text.js'],
+    names: ['src/App.jsx', 'Welcome'],
+  },
+  {
+    check: '3 the two languages match',
+    plant: { file: 'src/i18n/es.js', anchor: "  'page.taxes.title': 'Impuestos y cargos',\n", with: '' },
+    run: ['node', 'scripts/check-languages-match.js'],
+    names: ['page.taxes.title: missing in es'],
+  },
+  // The bug found on main: the alert-contact sentence written under the key
+  // the "cannot be reached" sentence already had, so the later one won on every page.
+  {
+    check: '3 the two languages match: a key written twice in English',
+    plant: { file: 'src/i18n/en.js', anchor: '  "problem.contactUnreachable": "Give a phone number, an email address, or both.",\n', with: '  "problem.unreachable": "Give a phone number, an email address, or both.",\n' },
+    run: ['node', 'scripts/check-languages-match.js'],
+    names: ['problem.unreachable: given 2 times in en.js (lines 119, 710); only the last is ever shown'],
+  },
+  {
+    check: '3 the two languages match: a key written twice in Spanish',
+    plant: { file: 'src/i18n/es.js', anchor: '  "problem.contactUnreachable": "Indique un teléfono, un correo, o ambos.",\n', with: '  "problem.unreachable": "Indique un teléfono, un correo, o ambos.",\n' },
+    run: ['node', 'scripts/check-languages-match.js'],
+    names: ['problem.unreachable: given 2 times in es.js (lines 115, 706); only the last is ever shown'],
+  },
+  // The side menu (src/menu.js): its shape, kept open or closed, and
+  // the group of the page shown opening itself, each red on its plant.
+  {
+    check: 'menu: the top in another order',
+    plant: { file: 'src/menu.js', anchor: "export const TOP = ['home', 'inside', 'alerts'];", with: "export const TOP = ['home', 'alerts', 'inside'];" },
+    run: ['node', '--test', 'test/menu.test.js'],
+    names: ['the top: Home, Garage View, Alerts, in that order'],
+  },
+  {
+    check: 'menu: a page left out of Setup',
+    plant: { file: 'src/menu.js', anchor: '    setup: pages.filter((p) => !TOP.includes(p.id)),', with: "    setup: pages.filter((p) => !TOP.includes(p.id) && p.id !== 'banned')," },
+    run: ['node', '--test', 'test/menu.test.js'],
+    names: ['Setup: every other page, in the order the pages are listed, each once'],
+  },
+  {
+    check: 'menu: anything kept on the computer read back',
+    plant: { file: 'src/menu.js', anchor: "      if (typeof open === 'boolean' && /^(own|host):[A-Za-z0-9_-]{1,64}$/.test(key)) out[key] = open;", with: '      out[key] = open;' },
+    run: ['node', '--test', 'test/menu.test.js'],
+    names: ['kept on this computer and read back: only group keys with true or false'],
+  },
+  // Rates that price a VIP kind beside the garage's own (written by the host's pages): a save
+  // from the Rates page leaves no kind with nothing to price it.
+  {
+    check: 'rates: a regular part changed prices only the garage\'s own kind',
+    plant: { file: 'src/rates.js', anchor: 'id: rule.id, space_classes: rule.space_classes, ...extra });', with: 'id: rule.id, ...extra });' },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['a save from either section leaves no kind with nothing to price it'],
+  },
+  {
+    check: 'rates: a regular part ticked on prices only the garage\'s own kind',
+    plant: { file: 'src/rates.js', anchor: 'rules.splice(built.rules.indexOf(rule), 0, { ...rule, space_classes: classes });', with: 'rules.splice(built.rules.indexOf(rule), 0, rule);' },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['a save from either section leaves no kind with nothing to price it'],
+  },
+  {
+    check: 'rates: a special added prices only the garage\'s own kind',
+    plant: { file: 'src/rates.js', anchor: '  const classes = pricedClasses(base, spaceClass);', with: '  const classes = [spaceClass];' },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['a save from either section leaves no kind with nothing to price it'],
+  },
+  // A host's note on one page (src/extras.js NOTE_PAGES): each refusal red on its plant.
+  {
+    check: 'extras: a note accepted on any page',
+    plant: { file: 'src/extras.js', anchor: "!NOTE_PAGES.includes(n.page) || !entry.menu", with: "!entry.menu" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a note: on a page of NOTE_PAGES only'],
+  },
+  {
+    check: 'extras: a note accepted from an entry not in the menu',
+    plant: { file: 'src/extras.js', anchor: "!NOTE_PAGES.includes(n.page) || !entry.menu", with: "!NOTE_PAGES.includes(n.page)" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a note: on a page of NOTE_PAGES only'],
+  },
+  // Extra pages from the host (src/extras.js): each refusal red on its plant.
+  {
+    check: 'extras: a path of another host is accepted',
+    plant: { file: 'src/extras.js', anchor: "    if (!text.startsWith('/') || text.startsWith('//')) return false;", with: "    if (!text.startsWith('/')) return false;" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a path is this origin\'s, or it is refused'],
+  },
+  {
+    check: 'extras: a path outside the listed prefix is accepted',
+    plant: { file: 'src/extras.js', anchor: '  const under = (p) => ownPath(p) && prefixes.some((prefix) => p.startsWith(prefix));', with: '  const under = (p) => ownPath(p);' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a path is this origin\'s, or it is refused'],
+  },
+  {
+    check: 'extras: a message from another origin is acted on',
+    plant: { file: 'src/extras.js', anchor: '  if (!event || event.origin !== origin) return null;', with: '  if (!event) return null;' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a message is acted on from this origin only'],
+  },
+  {
+    check: 'extras: a height of a million is taken',
+    plant: { file: 'src/extras.js', anchor: '    if (typeof m.height !== \'number\' || !Number.isFinite(m.height) || m.height < 0 || m.height > MAX_HEIGHT) return null;', with: '    if (typeof m.height !== \'number\') return null;' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a message is acted on from this origin only'],
+  },
+  {
+    check: 'extras: a malformed file draws something',
+    plant: { file: 'src/extras.js', anchor: "  if (!file || typeof file !== 'object' || !Array.isArray(file.pages) || file.pages.length > 20) return [];", with: "  if (!file || typeof file !== 'object' || !Array.isArray(file.pages)) return [];" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a malformed file gives none'],
+  },
+  {
+    check: 'extras: an entry whose path is another host\'s is still drawn',
+    plant: { file: 'src/extras.js', anchor: '  if (!under(raw.page)) return null;', with: '  if (typeof raw.page !== \'string\') return null;' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a path is this origin\'s, or it is refused'],
+  },
+  // The host's menu group (src/extras.js): each refusal red on its plant.
+  {
+    check: 'extras: a page naming a group the file does not name is drawn',
+    plant: { file: 'src/extras.js', anchor: "typeof raw.menu.group !== 'string' || !groups.has(raw.menu.group)) return null;", with: "typeof raw.menu.group !== 'string') return null;" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a menu group is read whole or left out'],
+  },
+  {
+    check: 'extras: a group list longer than allowed gives groups',
+    plant: { file: 'src/extras.js', anchor: '  if (!Array.isArray(raw) || raw.length > MAX_GROUPS) return out;', with: '  if (!Array.isArray(raw)) return out;' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a menu group is read whole or left out'],
+  },
+  {
+    check: 'extras: a group with no name in both languages is kept',
+    plant: { file: 'src/extras.js', anchor: '    const title = words(g.title);\n    if (!title) continue;\n', with: "    const title = words(g.title) ?? { en: String(g.title?.en), es: String(g.title?.es) };\n" },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a menu group is read whole or left out'],
+  },
+  {
+    check: 'extras: any address names a menu page',
+    plant: { file: 'src/extras.js', anchor: '  return ID.test(id) ? id : null;', with: '  return id || null;' },
+    run: ['node', '--test', 'test/extras.test.js'],
+    names: ['a menu page has its own address'],
+  },
+  {
+    check: '4 Quick Find finds every page in both languages',
+    plant: { file: 'src/search.js', anchor: '...PAGES.map((page) =>', with: "...PAGES.filter((p) => p.id !== 'readers').map((page) =>" },
+    run: ['node', '--test', 'test/search.test.js'],
+    names: ['finds the readers page first'],
+  },
+  {
+    check: '5 day/night/auto: the reload',
+    plant: { file: 'src/theme.js', anchor: '    storage?.setItem(THEME_KEY, choice);', with: '    void storage;' },
+    run: ['node', '--test', 'test/theme.test.js'],
+    names: ['the choice survives a reload', 'day was not kept'],
+  },
+  {
+    check: '5 day/night/auto: auto changing live',
+    plant: { file: 'src/theme.js', anchor: "  media?.addEventListener?.('change', onComputerChange);", with: '' },
+    run: ['node', '--test', 'test/theme.test.js'],
+    names: ['auto changes live when the computer changes'],
+  },
+  {
+    check: '8 contrast: a pair below 4.5 : 1',
+    plant: { file: 'src/styles.css', anchor: '  --text-secondary: rgba(249, 246, 240, 0.66);', with: '  --text-secondary: rgba(249, 246, 240, 0.3);' },
+    run: ['node', 'scripts/check-contrast.js'],
+    names: ['LOW night --text-secondary'],
+  },
+  {
+    check: '8 contrast: a text colour the check does not measure',
+    plant: {
+      file: 'src/styles.css',
+      anchor: '  font-size: 12px;\n  color: var(--text-secondary);\n}',
+      with: '  font-size: 12px;\n  color: #aaaaaa;\n}',
+    },
+    run: ['node', 'scripts/check-contrast.js'],
+    names: ['.find-hint: color: #aaaaaa'],
+  },
+  {
+    check: '9 no colour from the first look',
+    // The three night values the first gate found left in at ca0e68d, put back.
+    plant: {
+      file: 'src/styles.css',
+      anchor:
+        '  --backdrop: rgba(14, 12, 9, 0.72);\n' +
+        '  --shadow: 0 1px 2px rgba(14, 12, 9, 0.5), 0 4px 16px rgba(14, 12, 9, 0.5);\n' +
+        '  --shadow-hover: 0 4px 10px rgba(14, 12, 9, 0.6), 0 12px 32px rgba(14, 12, 9, 0.6);\n',
+      with:
+        '  --backdrop: rgba(0, 0, 0, 0.6);\n' +
+        '  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.3);\n' +
+        '  --shadow-hover: 0 4px 10px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.4);\n',
+    },
+    run: ['node', 'scripts/check-old-colours.js'],
+    names: [
+      'is rgba(0, 0, 0, 0.6) from the first look',
+      'is rgba(0, 0, 0, 0.3) from the first look',
+      'is rgba(0, 0, 0, 0.4) from the first look',
+      '3 found',
+    ],
+  },
+  {
+    check: 'the page never touches the session',
+    plant: { file: 'src/api.js', anchor: "const BASE = '/api/v1';", with: "const BASE = '/api/v1';\nexport const peek = () => document.cookie;" },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['src/api.js:16: document.cookie'],
+  },
+  {
+    check: 'the menu\'s kept state written under another key',
+    plant: { file: 'src/menu.js', anchor: '    storage?.setItem(MENU_KEY, JSON.stringify(state));', with: "    storage?.setItem('openparking-admin.last', JSON.stringify(state));" },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['a storage write that is not one of the kept choices', 'of the 3 kept-choice writes'],
+  },
+  {
+    check: 'requests stay home: an absolute address',
+    plant: { file: 'src/api.js', anchor: "const BASE = '/api/v1';", with: "const BASE = 'http://127.0.0.1:3000/api/v1';" },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['src/api.js:15: an absolute address http://127.0.0.1:3000/api/v1'],
+  },
+  {
+    check: 'no source maps',
+    plant: { file: 'vite.config.js', anchor: '    sourcemap: false,', with: '    sourcemap: true,' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-no-source-maps.js'],
+    names: ['.js.map: a .map file', 'sourceMappingURL', 'Files in the build:'],
+  },
+  {
+    check: "Home says only what it shows",
+    // The four-kind sentence, put back.
+    plant: {
+      file: 'src/i18n/en.js',
+      anchor: "    'Your garages at a glance: whether their lanes are working, and how many cars are inside.',",
+      with:
+        "    'See at a glance which lanes are working, whether everything is running as it should, and how many cars are inside right now: garage pass, monthly, transient and registered transient.',",
+    },
+    run: ['node', 'scripts/check-home-claims.js'],
+    names: ['en: page.home.purpose: "garage pass"', 'en: page.home.purpose: "monthly"', 'en: page.home.purpose: "transient"'],
+  },
+  {
+    check: 'every sign-in answer has its own words',
+    // Forget one of the platform's answers: busy falls back to "something went wrong".
+    plant: { file: 'src/api.js', anchor: "  [503, 'sign_in_busy', 'busy'],\n", with: '' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['every answer the real sign-in route gives has its own plain sentence', '503 sign_in_busy'],
+  },
+  {
+    check: 'the stand-in answers as the platform does',
+    // The stand-in's sign-out answers with a body, as it did before the platform was measured.
+    plant: { file: 'test/stub-platform.js', anchor: '      return send(res, 204, undefined, clearCookie);', with: '      return send(res, 200, { signed_out: true }, clearCookie);' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "sign-out"'],
+  },
+  {
+    check: 'a gateway answering for a platform it cannot reach',
+    // Forget the gateway: its 502 page falls back to "something went wrong".
+    plant: { file: 'src/api.js', anchor: "    if (GATEWAY.includes(res.status) && !fromPlatform) throw new Problem('unreachable');\n", with: '' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['a 502 with a page of its own, signing in'],
+  },
+  {
+    check: "the platform's own busy and 500 keep their words",
+    // Overreach: every 5xx made "cannot be reached".
+    plant: { file: 'src/api.js', anchor: 'if (GATEWAY.includes(res.status) && !fromPlatform)', with: 'if (res.status >= 500)' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ["the platform's own busy, signing in", "the platform's own 500, signing in"],
+  },
+  {
+    check: 'the development proxy answers as a gateway',
+    // The proxy left to answer a 500 when the platform is stopped.
+    plant: { file: 'vite.config.js', anchor: ", configure: answerAsAGateway }", with: ' }' },
+    run: ['node', '--test', 'test/dev-proxy.test.js'],
+    names: ['signing in: the platform stopped behind the development proxy'],
+  },
+  {
+    check: 'English by default',
+    // The browser's language decides again, as firstLanguage did.
+    plant: [
+      { file: 'src/i18n/index.js', anchor: 'export function readLanguage(storage) {', with: 'export function readLanguage(storage, browserLanguages) {' },
+      {
+        file: 'src/i18n/index.js',
+        anchor: '  return knownLanguage(stored) ?? DEFAULT_LANGUAGE;',
+        with: "  return knownLanguage(stored) ?? (String(browserLanguages?.[0] ?? '').toLowerCase().startsWith('es') ? 'es' : DEFAULT_LANGUAGE);",
+      },
+    ],
+    run: ['node', '--test', 'test/language.test.js'],
+    names: ['nothing saved: English, whatever the browser asks for'],
+  },
+  {
+    check: 'the language is kept with a PUT of its own',
+    plant: { file: 'src/api.js', anchor: "request('/auth/language', { method: 'PUT', body: { language } })", with: "request('/auth/language', { method: 'POST', body: { language } })" },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['the language is kept with one PUT of {"language"}'],
+  },
+  {
+    check: 'no technical words: "device"',
+    plant: { file: 'src/i18n/en.js', anchor: "'Your entry and exit lanes, and the equipment at each one.'", with: "'Your entry and exit lanes, and the device at each one.'" },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: page.lanes.purpose: "device"'],
+  },
+  {
+    check: 'no technical words: "dispositivos"',
+    plant: { file: 'src/i18n/es.js', anchor: "'Carriles y equipos'", with: "'Carriles y dispositivos'" },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['es: page.lanes.title: "dispositivos"'],
+  },
+  {
+    check: 'no technical words: "goes live"',
+    // the Garages page's line now ends on its Setup; the same break, at its new end.
+    plant: { file: 'src/i18n/en.js', anchor: 'and how much of its setup is done.', with: 'and when it goes live.' },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: page.garages.purpose: "goes live"'],
+  },
+  {
+    check: 'every field described: one description removed',
+    plant: { file: 'src/i18n/es.js', anchor: "  'inside.ticket.about': 'El número de boleto, si se sacó un boleto en el carril.',\n", with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: inside.ticket.about (Garage View): missing'],
+  },
+  {
+    check: 'every field described: a column named without one',
+    plant: { file: 'src/InsidePage.jsx', anchor: '                <FieldName t={t} name="inside.ticket" />', with: "                {t('inside.ticket')}" },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['Garage View (src/InsidePage.jsx:', 'a list column with no description'],
+  },
+  {
+    check: 'every field described: a description over 15 words',
+    plant: {
+      file: 'src/i18n/en.js',
+      anchor: "  'signIn.password.about': 'The password that goes with that email.',",
+      with: "  'signIn.password.about': 'The password that goes with that email address, the one your garages were set up with long ago.',",
+    },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['en: signIn.password.about (Sign in): 18 words, more than 15'],
+  },
+  {
+    check: "Home's descriptions say only what it shows",
+    plant: {
+      file: 'src/i18n/en.js',
+      anchor: "  'home.inside.about': 'Cars the sensors saw come in that are still inside, plus any not confirmed.',",
+      with: "  'home.inside.about': 'Monthly and transient cars the sensors saw drive in.',",
+    },
+    run: ['node', 'scripts/check-home-claims.js'],
+    names: ['en: home.inside.about: "monthly"', 'en: home.inside.about: "transient"'],
+  },
+  {
+    check: 'the stand-in answers the language as the platform does',
+    // The stand-in's sign-in answer without the language.
+    plant: {
+      file: 'test/stub-platform.js',
+      anchor: 'session_ends_at: new Date(Date.now() + 30 * MINUTE).toISOString(), language: who.language }, {',
+      with: 'session_ends_at: new Date(Date.now() + 30 * MINUTE).toISOString() }, {',
+    },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "sign-in"'],
+  },
+  {
+    check: '"Lane computers" says what the column holds',
+    // The first gate's finding put back: the description names one computer.
+    plant: {
+      file: 'src/i18n/en.js',
+      anchor: "  'lanes.computers.about': 'Every connection this lane has had: whether it answers, or when it was cancelled.',",
+      with: "  'lanes.computers.about': 'The connection of this lane, and when it was last heard from.',",
+    },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['en lanes.computers.about says nothing of: several computers', 'en lanes.computers.about says nothing of: a cancelled computer'],
+  },
+  {
+    check: 'a cancelled computer is not "no lane computer yet"',
+    // The first gate's finding put back: a lane with only cancelled computers is "yet".
+    plant: { file: 'src/lanes.js', anchor: "  if (cancelled.length === 0) return { state: 'none', text: t('lane.noComputer') };", with: "  return { state: 'none', text: t('lane.noComputer') };" },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['a lane whose only computer had its access cancelled says so, and when', 'it says the lane never had a computer'],
+  },
+  {
+    check: 'every state: Home\'s lanes description silent on a lane with no working computer',
+    plant: {
+      file: 'src/i18n/es.js',
+      anchor: "  'home.lanes.about': 'Cada carril, entrada o salida, y si está conectado y responde, o por qué no.',",
+      with: "  'home.lanes.about': 'Cada carril, de entrada o salida, y cuándo se comunicó por última vez.',",
+    },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['es home.lanes.about says nothing of: no working computer'],
+  },
+  {
+    check: 'every state: "no cars inside" beside one let in',
+    plant: { file: 'src/inside.js', anchor: "  else figure = unconfirmed > 0 ? t('inside.countNoneConfirmed') : t('inside.countNone');", with: "  else figure = t('inside.countNone');" },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['it says no cars are inside, beside one let in'],
+  },
+  {
+    check: 'every state: "came in" said of a car that was only let in',
+    plant: {
+      file: 'src/i18n/es.js',
+      anchor: "  'inside.letIn.about': 'Cuándo el carril dejó pasar el carro, en la hora del garaje.',",
+      with: "  'inside.letIn.about': 'Cuándo entró el carro, en la hora del garaje.',",
+    },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['es inside.letIn.about says the car came in'],
+  },
+  {
+    check: 'a chooser without its description',
+    // the choosers are on the Settings page (and the sign-in screen, which draws the same ones).
+    plant: { file: 'src/SettingsPage.jsx', anchor: '        <FieldName t={t} name="theme.label" />\n', with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['Settings (src/SettingsPage.jsx:', 'a chooser with no description'],
+  },
+  {
+    check: 'a chooser\'s description missing in one language',
+    plant: { file: 'src/i18n/es.js', anchor: "  'language.label.about': 'El idioma de estas páginas. Si ya entró, se guarda para la próxima vez.',\n", with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: language.label.about (Settings): missing'],
+  },
+  {
+    check: 'Quick Find without its description',
+    plant: { file: 'src/QuickFind.jsx', anchor: '          <FieldAbout t={t} name="quickFind.label" />\n', with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['Quick Find (src/QuickFind.jsx:', 'a typing box with no description'],
+  },
+  {
+    check: 'the garage chooser without its description',
+    plant: { file: 'src/parts.jsx', anchor: '        <FieldName t={t} name="garage.choose" />', with: "        {t('garage.choose')}" },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['choosing a garage (src/parts.jsx:', 'the garage chooser with no description'],
+  },
+  {
+    check: 'the file is the list: a row dropped from the Excel file',
+    plant: { file: 'src/files/excel.js', anchor: '  const body = file.rows.map((cells) =>', with: '  const body = file.rows.slice(1).map((cells) =>' },
+    run: CHECK_FILES,
+    names: ['FAIL 1 the file is the list: inside xlsx (en): 3 rows read back of the list\'s 4'],
+  },
+  {
+    check: 'the file is the list: a row dropped from the PDF',
+    plant: { file: 'src/files/pdf.js', anchor: '  for (const row of file.rows) {', with: '  for (const row of file.rows.slice(1)) {' },
+    run: CHECK_FILES,
+    names: ['FAIL 1 the file is the list: inside pdf (en): 2 of 3 plates on a page exactly once', 'not once: HRB4410 · FL'],
+  },
+  {
+    check: "garage time: the computer's zone used for a time cell",
+    plant: { file: 'src/files/model.js', anchor: "  const parts = new Intl.DateTimeFormat('en-US', {\n    timeZone,\n", with: "  const parts = new Intl.DateTimeFormat('en-US', {\n" },
+    run: CHECK_FILES,
+    names: ['FAIL 2 garage time: inside xlsx (en): before and after the clock change, 2026-03-08 15:30:00 and 2026-03-08 16:30:00'],
+  },
+  {
+    check: "garage time: the zone sentence names the computer's zone",
+    plant: { file: 'src/files/model.js', anchor: "{ timeZone, timeZoneName: 'longGeneric' }", with: "{ timeZoneName: 'longGeneric' }" },
+    run: CHECK_FILES,
+    names: ['FAIL 2 garage time: inside xlsx (en): the zone sentence "Times are Eastern Time."', 'Times are Japan Standard Time.'],
+  },
+  {
+    check: 'text stays text: a ticket written as a number',
+    plant: {
+      file: 'src/files/excel.js',
+      anchor: '    cells.map((cell) => (cell.wall ? { number: excelDay(cell.wall), style: TIME } : { text: fit(cell.text) })),',
+      with: '    cells.map((cell) => (cell.wall ? { number: excelDay(cell.wall), style: TIME } : /^\\d+$/.test(cell.text) ? { number: Number(cell.text) } : { text: fit(cell.text) })),',
+    },
+    run: CHECK_FILES,
+    names: ['FAIL 3 text stays text: inside xlsx (en): 3 of 4 come back as text', 'not text: 007'],
+  },
+  {
+    check: 'text stays text: "=1+1" written as a formula',
+    plant: {
+      file: 'src/files/excel.js',
+      anchor: '      if (cell.number !== undefined)',
+      with: "      if (String(cell.text).startsWith('=')) return `<c r=\"${ref}\"><f>${escape(cell.text.slice(1))}</f></c>`;\n      if (cell.number !== undefined)",
+    },
+    run: CHECK_FILES,
+    names: ['FAIL 3 text stays text: inside xlsx (en)', 'formulas in the workbook: 1'],
+  },
+  {
+    check: 'a letter the font cannot draw, dropped unseen',
+    plant: { file: 'src/files/pdf.js', anchor: '    for (const ch of made.missing) missing.add(ch);\n', with: '' },
+    run: CHECK_FILES,
+    names: ['FAIL 4 a letter the font cannot draw is named, not dropped unseen: []'],
+  },
+  {
+    check: 'the page break broken',
+    plant: {
+      file: 'src/files/pdf.js',
+      anchor: '      if (!fresh && (room < Math.min(tallest, 1) || (room < tallest && tallest * cellLead <= BOTTOM - MARGIN - 200))) {\n        newPage({ headings: true });\n        fresh = true;\n        continue;\n      }\n      const take = Math.max(1, Math.min(room, tallest));',
+      with: '      const take = tallest;',
+    },
+    run: CHECK_FILES,
+    names: ['FAIL 5 a long list (en): 250 stays run to 1 pages', 'FAIL 5 a long list (en):', 'text off the page: '],
+  },
+  {
+    check: 'the file name not cleaned',
+    plant: { file: 'src/files/model.js', anchor: "    String(text).replace(REFUSED_IN_NAMES, '')", with: '    String(text)' },
+    run: CHECK_FILES,
+    names: ['FAIL 10 the file name (xlsx): "Lanes and equipment - 2026-03-10 1141 - A/B:C*D?"E<F>|G'],
+  },
+  {
+    check: 'a column left out of "What each column means", Excel',
+    plant: {
+      file: 'src/files/excel.js',
+      anchor: '    ...file.columns.map((c) => [{ text: c.name, style: BOLD }, { text: c.about, style: WRAP }]),',
+      with: '    ...file.columns.slice(1).map((c) => [{ text: c.name, style: BOLD }, { text: c.about, style: WRAP }]),',
+    },
+    run: CHECK_FILES,
+    names: ['FAIL 12 descriptions: inside xlsx (en): sheet "What each column means" describes 4 of 5 columns', 'FAIL 12 descriptions: lanes xlsx (es)'],
+  },
+  {
+    check: 'a column left out of "What each column means", PDF',
+    plant: { file: 'src/files/pdf.js', anchor: '  for (const c of columns) paragraph(', with: '  for (const c of columns.slice(1)) paragraph(' },
+    run: CHECK_FILES,
+    names: ['FAIL 12 descriptions: inside pdf (en): page 1, under "What each column means", describes 4 of 5 columns'],
+  },
+  {
+    check: "a file column's description missing in one language",
+    plant: { file: 'src/i18n/es.js', anchor: "  'file.state.about': 'Funcionando, sin comunicarse últimamente, nunca comunicada, o con su acceso cancelado.',\n", with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: file.state.about (the files of Lanes and equipment): missing'],
+  },
+  {
+    check: 'no technical words on the new buttons',
+    plant: { file: 'src/i18n/en.js', anchor: "  'download.making': 'Making the file…',", with: "  'download.making': 'Making the file from the API…'," },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: download.making: "api"'],
+  },
+  {
+    check: 'the page stays home: an address in the Excel maker',
+    plant: { file: 'src/files/excel.js', anchor: 'Target="xl/workbook.xml"/>', with: 'Target="https://example.net/workbook.xml"/>' },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['src/files/excel.js:', 'an absolute address https://example.net/workbook.xml'],
+  },
+  {
+    check: 'a maker loaded with the first page',
+    plant: [
+      { file: 'src/ListActions.jsx', anchor: "import { ProblemNote } from './parts.jsx';", with: "import { ProblemNote } from './parts.jsx';\nimport * as eagerPdf from './files/pdfFile.js';" },
+      { file: 'src/ListActions.jsx', anchor: "  pdf: () => import('./files/pdfFile.js'),", with: '  pdf: async () => eagerPdf,' },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-first-load.js'],
+    names: ['the PDF library (jsPDF), loaded with the first page'],
+  },
+  {
+    check: 'undone: a control character reaches the PDF maker',
+    plant: [
+      { file: 'src/files/text.js', anchor: "    if (SPACE_LIKE.test(ch)) out += ' ';", with: '    if (SPACE_LIKE.test(ch)) out += ch;' },
+      { file: 'src/files/text.js', anchor: '    else if (LEFT_OUT.some(([, rule]) => rule.test(ch))) hidden = true;', with: '    else if (LEFT_OUT.some(([, rule]) => rule.test(ch))) out += ch;' },
+      { file: 'src/files/text.js', anchor: '    else if (INVISIBLE.test(ch)) hidden = true;', with: '    else if (INVISIBLE.test(ch)) out += ch;' },
+    ],
+    run: CHECK_FILES,
+    names: ['FAIL F2 a lane named "Gx<TAB>H2" prints as "Gx H2"; the PDF has "Gx": the text after <TAB> was lost', 'FAIL F2 a plate "TAB<TAB>999" prints as "TAB 999"; the PDF has "TAB"', 'FAIL odd text: plate × PDF'],
+  },
+  {
+    check: "undone: every page's top holds the whole name, and a row is tried again",
+    plant: [
+      { file: 'src/files/pdf.js', anchor: "    lines(shortName, 'bold', SIZE.garage);", with: "    lines(fullName, 'bold', SIZE.garage);" },
+      { file: 'src/files/pdf.js', anchor: '      if (!fresh && (room <', with: '      if ((room <' },
+    ],
+    run: CHECK_FILES,
+    names: ['FAIL F3 a garage name of 3,000 characters: the PDF is made within 5 s (not made', 'FAIL odd text: garage name × PDF'],
+  },
+  {
+    check: "a later page's name not cut to two lines",
+    plant: { file: 'src/files/pdf.js', anchor: 'const NAME_LINES = 2;', with: 'const NAME_LINES = 3;' },
+    run: CHECK_FILES,
+    names: ["FAIL odd text: garage name × PDF page tops", 'not cut to two lines with "…"'],
+  },
+  {
+    check: 'hidden characters left out of the PDF without a word',
+    plant: { file: 'src/files/pdf.js', anchor: '    hidden ||= made.hidden;', with: '    hidden ||= false;' },
+    run: CHECK_FILES,
+    names: ['FAIL F1/F2 the screen is told: hidden characters left out (false)', 'FAIL odd text: garage name × notice (PDF)'],
+  },
+  {
+    check: 'an invisible character named as a letter',
+    plant: { file: 'src/files/text.js', anchor: '    else if (INVISIBLE.test(ch)) hidden = true;', with: '    else if (INVISIBLE.test(ch)) missing.push(ch);' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: lane computer name × notice (PDF)', 'invisible named'],
+  },
+  {
+    // (chat's call): the Excel file no longer keeps controls;
+    // it carries the same text as the PDF. Skipping the rule there is the break.
+    check: 'the Excel file skips the rule both files keep',
+    plant: { file: 'src/files/excel.js', anchor: '    const both = kept(text);', with: '    const both = { text: String(text), hidden: false };' },
+    run: CHECK_FILES,
+    names: ['FAIL R2 a lane named "Gx<U+00AD>H2", Lanes, Excel (openpyxl): the lane reads "GxH2"', 'FAIL odd text: ticket × Excel (openpyxl)', 'FAIL odd text by category: Cf format character'],
+  },
+  {
+    // The same break, read by a spreadsheet app: LibreOffice, installed in CI.
+    check: 'the Excel file skips the rule both files keep, read by LibreOffice',
+    plant: { file: 'src/files/excel.js', anchor: '    const both = kept(text);', with: '    const both = { text: String(text), hidden: false };' },
+    env: { SPREADSHEET_READERS: 'libreoffice' },
+    run: CHECK_FILES,
+    names: ['FAIL R2 a lane named "Gx<U+00AD>H2", Lanes, Excel (libreoffice): the lane reads "GxH2"', 'FAIL odd text: ticket × Excel (libreoffice)'],
+  },
+  ...[
+    ['control', "  ['control', /\\p{Cc}/u],\n", 'Cc control'],
+    ['format character', "  ['format character', /\\p{Cf}/u],\n", 'Cf format character'],
+    ['noncharacter', "  ['noncharacter', /\\p{Noncharacter_Code_Point}/u],\n", 'noncharacter'],
+    ['lone surrogate', "  ['lone surrogate', /\\p{Cs}/u],\n", 'Cs lone surrogate'],
+  ].map(([kind, anchor, group]) => ({
+    check: `the ${kind} category dropped from the rule both files keep`,
+    plant: { file: 'src/files/text.js', anchor, with: '' },
+    run: CHECK_FILES,
+    names: [`FAIL odd text by category: ${group}`],
+  })),
+  {
+    check: 'glyph 0 counted as a shape the font draws',
+    plant: { file: 'src/files/pdf.js', anchor: '    if (!glyph) return false;', with: '    if (glyph === undefined) return false;' },
+    run: CHECK_FILES,
+    names: ['FAIL R2-F2 the font draws it', 'disagree on U+FFFF (the maker says drawable)'],
+  },
+  {
+    check: "a space's empty outline not counted",
+    plant: { file: 'src/files/pdf.js', anchor: '    return SPACE_LIKE.test(ch) || loca.lengthOf(glyph) > 0;', with: '    return loca.lengthOf(glyph) > 0;' },
+    run: CHECK_FILES,
+    names: ['FAIL R2-F2 the font draws it', 'disagree on U+000D (the maker says not drawable), U+0020'],
+  },
+  {
+    check: 'hidden characters left out of the Excel file without a word',
+    plant: { file: 'src/files/excel.js', anchor: '    hidden ||= both.hidden;', with: '    hidden ||= false;' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: garage name × notice (Excel)', 'hidden told false, want true', 'FAIL R2 the check-10 garage (BEL and U+202E before its H), Lanes, Excel: the screen is told hidden characters were left out of the file (false, want true)'],
+  },
+  {
+    check: 'a stored "_x0041_" read back by Excel as "A"',
+    plant: { file: 'src/files/excel.js', anchor: "      .replace(/_(?=x[0-9A-Fa-f]{4}_)/g, '_x005F_')\n", with: '' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: plate × Excel'],
+  },
+  {
+    check: 'a text longer than an Excel cell holds, not cut',
+    plant: { file: 'src/files/text.js', anchor: '  if (s.length <= EXCEL_CELL_LIMIT) return', with: '  if (s.length <= Infinity) return' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: lane name × Excel', 'want'],
+  },
+  {
+    check: 'an Excel cell cut without a word',
+    plant: { file: 'src/files/excel.js', anchor: '    cut ||= made.cut;', with: '    cut ||= false;' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: garage name × notice (Excel)', 'cut told false, longest text 40000'],
+  },
+  {
+    check: "the PDF's title keeps invisible characters",
+    plant: { file: 'src/files/pdf.js', anchor: '  const titleName = [...visibleOnly(file.garage)];', with: '  const titleName = [...String(file.garage)];' },
+    run: CHECK_FILES,
+    names: ['FAIL odd text: garage name × PDF title'],
+  },
+  {
+    check: 'the garage name before the time in the file name',
+    plant: { file: 'src/files/model.js', anchor: "  return `${[title, stamp, name].filter(Boolean).join(' - ')}.${extension}`;", with: "  return `${[title, name, stamp].filter(Boolean).join(' - ')}.${extension}`;" },
+    run: CHECK_FILES,
+    names: ['FAIL 10 the file name (xlsx): "Lanes and equipment - ABCDEFGH - 2026-03-10 1141.xlsx"', 'FAIL odd text: garage name × file name (pdf)'],
+  },
+  {
+    check: 'no technical words: "device" in a new entry',
+    plant: { file: 'src/i18n/en.js', anchor: "  \"lanes.connect\": \"Connect this lane\",", with: "  \"lanes.connect\": \"Connect this lane device\"," },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: lanes.connect: "device"'],
+  },
+  {
+    check: "a setup step's description missing in one language",
+    plant: { file: 'src/i18n/es.js', anchor: "  \"setup.step.rates.about\": \"Lo que se cobra a los conductores, vigente desde hoy.\",\n", with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: setup.step.rates.about (Setup): missing'],
+  },
+  {
+    check: 'the change log file is the list: a line dropped',
+    plant: { file: 'src/files/model.js', anchor: '  const rows = data.changes.map((line) => {', with: '  const rows = data.changes.slice(1).map((line) => {' },
+    run: CHECK_FILES,
+    names: ['FAIL 1 the file is the list: changes xlsx (en)'],
+  },
+  {
+    check: 'a time zone shown as its code',
+    plant: { file: 'src/changes.js', anchor: "  if (field === 'timezone') return { words: zoneSaid(value, language) ?? t('changes.value.anotherZone') };", with: "  if (field === 'timezone') return { words: value };" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['4 NO RAW VALUES', 'America/New_York'],
+  },
+  {
+    check: "a setting's choice shown as its code",
+    plant: { file: 'src/changes.js', anchor: "    return { words: CHOICES[field].includes(value) ? t(`changes.value.${field}.${value}`) : t('changes.value.another') };", with: '    return { words: value };' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['4 NO RAW VALUES', 'shown as its code'],
+  },
+  {
+    check: 'a refused attempt said as if it was done',
+    plant: { file: 'src/changes.js', anchor: '  const pieces = [{ words: t(actionKey(line.action, refused)) }];', with: '  const pieces = [{ words: t(actionKey(line.action, false)) }];' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['5 EVERY LINE IS TRUE', 'reads like the change was made'],
+  },
+  {
+    check: "another account's attempt on this garage said as \"not there\"",
+    plant: { file: 'src/changes.js', anchor: "  if (line.who?.kind === 'outside' && NOT_FOUND.includes(line.refusal)) return 'notTheirs';", with: "  if (false && NOT_FOUND.includes(line.refusal)) return 'notTheirs';" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['5 EVERY LINE IS TRUE', "in the aimed-at garage's log"],
+  },
+  {
+    check: 'a key whose name the line lacks, said as someone else',
+    plant: { file: 'src/changes.js', anchor: "  if (who.kind === 'key') return [{ words: t('changes.who.keyUnnamed') }];\n", with: '' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['3 EVERY LINE NAMES WHO', 'names no key'],
+  },
+  {
+    check: "fix2: this account's cancelled key said as a working one",
+    plant: { file: 'src/changes.js', anchor: '  if (noLonger && who.name) return named(t(noLonger), who.name);\n', with: '' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ["no longer worked is said as what it was"],
+  },
+  // ── alerts, and no "lane computer" ─────────────────────────────────
+  {
+    check: 'no "lane computer": planted in English',
+    plant: { file: 'src/i18n/en.js', anchor: "  \"lanes.connect\": \"Connect this lane\",", with: "  \"lanes.connect\": \"Connect a lane computer\"," },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: lanes.connect: "lane computer"'],
+  },
+  {
+    check: 'no "lane computer": planted in Spanish',
+    plant: { file: 'src/i18n/es.js', anchor: "  \"lanes.connect\": \"Conectar este carril\",", with: "  \"lanes.connect\": \"Conectar una computadora de carril\"," },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['es: lanes.connect: "computadora de carril"'],
+  },
+  {
+    check: 'no technical words: "SMS" in a new entry',
+    plant: { file: 'src/i18n/en.js', anchor: '  "alerts.byText": "By text",', with: '  "alerts.byText": "By SMS",' },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: alerts.byText: "sms"'],
+  },
+  {
+    check: '"server" alone is still refused: only "server room" is read whole',
+    plant: { file: 'src/i18n/en.js', anchor: "or the computer in the server room has lost power.", with: "or the server has lost power." },
+    run: ['node', 'scripts/check-plain-words.js'],
+    names: ['en: alerts.alert.garage_not_answering.says: "server"'],
+  },
+  {
+    check: "an Alerts field's description missing in one language",
+    plant: { file: 'src/i18n/es.js', anchor: '  "alerts.email.about": "Su dirección de correo, para alertas por correo.",\n', with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: alerts.email.about (Alerts): missing'],
+  },
+  {
+    check: "the change log says which alerts by their codes",
+    plant: { file: 'src/changes.js', anchor: "    return { words: value.map((key) => alertName(t, key)).join(', ') };", with: "    return { words: value.join(', ') };" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ["a person's line", 'lane_not_answering, card_payments_stopped'],
+  },
+  {
+    check: 'an alert these pages have no words for, said as its key',
+    plant: { file: 'src/alerts.js', anchor: "export const alertName = (t, key) => (known(key) ? t(`alerts.alert.${key}`) : t('alerts.alert.other'));", with: 'export const alertName = (t, key) => (known(key) ? t(`alerts.alert.${key}`) : key);' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ["a person's line"],
+  },
+  {
+    check: 'the Alerts file is the list: a person dropped',
+    plant: { file: 'src/files/model.js', anchor: '  const rows = data.contacts.map((p) => [', with: '  const rows = data.contacts.slice(1).map((p) => [' },
+    run: CHECK_FILES,
+    names: ['FAIL 1 the file is the list: alerts xlsx (en)', 'FAIL 1 the file is the list: alerts pdf (en)'],
+  },
+  // ── Alerts ────────────────────────────────────────────────
+  {
+    check: 'check 3: the kind of change blanked -- a person\'s name change says nothing',
+    plant: { file: 'src/changes.js', anchor: "    return { words: PERSON_CHOICES[field].includes(value) ? t(`changes.value.${field}.${value}`) : t('changes.value.another') };", with: "    return { words: '' };" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['EVERY LINE ABOUT A PERSON', 'is not said in words'],
+  },
+  {
+    check: 'check 3: the kind of change blanked -- a line about a person says no action',
+    plant: { file: 'src/changes.js', anchor: '  const pieces = [{ words: t(actionKey(line.action, refused)) }];', with: "  const pieces = [{ words: line.subject?.kind === PERSON ? '' : t(actionKey(line.action, refused)) }];" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['EVERY LINE ABOUT A PERSON', 'what was done is not said'],
+  },
+  {
+    check: 'check 3: a removed person said by the id their line holds',
+    plant: { file: 'src/changes.js', anchor: "pieces.push({ words: ': ' }, { words: t('changes.person.removed') });", with: "pieces.push({ words: ': ' }, { stored: line.subject.id });" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['EVERY LINE ABOUT A PERSON', 'the person'],
+  },
+  {
+    check: 'a PDF column narrowed back: Confirmed',
+    plant: { file: 'src/files/model.js', anchor: "    { key: 'alerts.confirmed', width: 0.109 },", with: "    { key: 'alerts.confirmed', width: 0.09 }," },
+    run: ['node', 'scripts/check-pdf-words.js'],
+    names: ['FAIL en alerts, heading "Confirmed": split inside the word', 'FAIL es alerts, column "Confirmado"', '"confirmar"'],
+  },
+  {
+    check: 'a PDF column narrowed: the change log\'s What',
+    plant: { file: 'src/files/model.js', anchor: "    { key: 'changes.what', width: 0.2 },", with: "    { key: 'changes.what', width: 0.1 }," },
+    run: ['node', 'scripts/check-pdf-words.js'],
+    names: ['FAIL en changes, column "What": ', 'split inside the word'],
+  },
+  {
+    check: "the stand-in's phone refusal not the platform's word for word",
+    plant: { file: 'test/stub-platform.js', anchor: "  error: `phone ${why}. A US number is 10 digits", with: "  error: `the phone ${why}. A US number is 10 digits" },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a person to tell, a phone with letters"'],
+  },
+  {
+    check: '9: a sample the screen cannot show',
+    plant: { file: 'src/i18n/es.js', anchor: '"lanes.sample.everyone2": "Cerrado por obras.",', with: '"lanes.sample.everyone2": "Cerrado por obras — disculpe.",' },
+    run: ['node', '--test', 'test/screen.test.js'],
+    names: ['every sample message, in both languages, is one the screen can show'],
+  },
+  {
+    check: '9: the screen\'s rule takes a letter that is two in capitals',
+    plant: { file: 'src/screen.js', anchor: '    if ((upper.length !== 1 || !drawable.has(upper[0])) && !seen.includes(c)) seen.push(c);', with: '    if (!upper.every((u) => drawable.has(u)) && !seen.includes(c)) seen.push(c);' },
+    run: ['node', '--test', 'test/screen.test.js'],
+    names: ['a character the screen cannot show is named'],
+  },
+  {
+    check: '7: the stand-in closes a way out "full"',
+    plant: { file: 'test/stub-platform.js', anchor: "      if (body.reason === 'full' && lane.direction !== 'entry') return refuse(res, who, 400, FULL_IS_A_WAY_IN, at);\n", with: '' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in answers every call and refusal the screens meet as the platform does'],
+  },
+  {
+    check: 'a sentence that ends twice',
+    plant: { file: 'src/i18n/index.js', anchor: "export const endOnce = (text) => text.replace(/(?<!\\.)\\.\\.(?!\\.)/g, '.');", with: 'export const endOnce = (text) => text;' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['6 NO SENTENCE ENDS TWICE', 'a.m..'],
+  },
+  // ── the installer drawings (scripts/check-drawings.js) ──────────────
+  {
+    check: '1: a length typed into a sheet',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.plan.measured": "All distances are measured back from the gate arm."', with: '"drawings.plan.measured": "All distances are measured back from the gate arm, 12 ft apart."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en, any driver: every number', '"All distances are measured back from the gate arm, 12 ft apart." holds a number that is not the table\'s'],
+  },
+  {
+    check: '2: a Draft 7 value changed in the table',
+    plant: { file: 'src/drawings/numbers.js', anchor: "truckBack: length(283, '7.2', 'worked'),", with: "truckBack: length(283, '7.3', 'worked')," },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL Draft 7 "23 ft 7 in (7.2 m)" -> truckBack is 283 in (7.3), not 283 in (7.2)'],
+  },
+  {
+    check: '3: a length in metres only',
+    plant: { file: 'src/drawings/numbers.js', anchor: "      return t('drawings.unit.length', { imperial: feetAndInches(n.inches, t), metric: metric(n, t) });", with: '      return metric(n, t);' },
+    run: CHECK_DRAWINGS,
+    names: ['a length in one unit only', 'FAIL en, any driver: all'],
+  },
+  {
+    check: '4: entry types swapped',
+    plant: { file: 'src/drawings/sheets.js', anchor: "  const entryType = reader ? '2A' : '2B';\n  const plans", with: "  const entryType = reader ? '2B' : '2A';\n  const plans" },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: any driver, two ways in and one out -> sheets 2B (North Entry), 2B (South Entry), exit (Main Exit)', 'FAIL en: pass holders only -> sheets 2A, exit'],
+  },
+  {
+    check: '4: a card reader at every exit',
+    plant: { file: 'src/drawings/sheets.js', anchor: "    reader: lane.direction === 'exit' && reader,", with: "    reader: lane.direction === 'exit'," },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: pass holders only -> no card reader at the exit, no N5, no W3'],
+  },
+  {
+    check: '4: a set made with no drivers answer',
+    plant: { file: 'src/drawings/sheets.js', anchor: "  if (takesAnyDriver !== true && takesAnyDriver !== false) needs.push('drivers');", with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: no answer to the drivers question -> no set'],
+  },
+  {
+    check: '5: "gate box" on a sheet',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera, on the gate box."' },
+    run: CHECK_DRAWINGS,
+    names: ['"gatebox" in "Front camera, on the gate box."'],
+  },
+  {
+    check: '5: "lane computer" on a Spanish sheet',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.how2A.atExit": "Un conductor con pase, o uno que quiere registrarse, lo hace a la salida."', with: '"drawings.how2A.atExit": "Un conductor con pase lo hace a la salida, en la computadora del carril."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL es, any driver: no gate box', '"computadoradelcarril"'],
+  },
+  {
+    check: "5: an owner's decision on a sheet",
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.sources.oneTable": "Every number on these sheets comes from one table, listed here with its source."', with: '"drawings.sources.oneTable": "Every number on these sheets comes from one table. The stop distance is the owner\'s decision."' },
+    run: CHECK_DRAWINGS,
+    names: ['"ownersdecision" in'],
+  },
+  {
+    check: "5: a person's name on a sheet",
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.sources.worked": "Camera angles are worked out from the distances and the F-150 size."', with: '"drawings.sources.worked": "Camera angles are worked out from the distances by Jane Doe."' },
+    run: CHECK_DRAWINGS,
+    names: ['a name "Jane" in', 'a name "Doe" in'],
+  },
+  {
+    check: 'the 6 ft loop drawn back in the 10 ft lane',
+    plant: { file: 'src/drawings/plan.js', anchor: "  const loopL = laneWidth - 2 * U * metres('loopEdgeMax');", with: '  const loopL = U * 1.83;' },
+    run: CHECK_DRAWINGS,
+    names: ['a loop drawn 24.0 in from the lane edge, not 12 to 20 in', 'FAIL en, any driver: all'],
+  },
+  {
+    check: "a driver's control drawn within 6 ft of the arm",
+    plant: { file: 'src/drawings/plan.js', anchor: "  const pay = before('payStation');", with: '  const pay = ARM - U * 1.2;' },
+    run: CHECK_DRAWINGS,
+    names: ["a driver's control drawn", "in from the arm's sweep, under 72 in", "FAIL en, any driver: all 3 drivers' controls"],
+  },
+  // ── gate fixes ─────────────────────────────────────────────────────────
+  {
+    check: 'gate 4: the card reader in a sentence on a pass-only set',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t(reader ? 'drawings.every.reach' : 'drawings.every.reachPassOnly',", with: "t('drawings.every.reach'," },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: pass holders only -> the card reader is named only to say there is none', 'scanner, card reader, intercom'],
+  },
+  {
+    check: 'gate 4: the card-reader sentence typed into a sheet',
+    plant: { file: 'src/drawings/sheets.js', anchor: "  left.para(t('drawings.about.trade'));", with: "  left.para(t('drawings.about.trade'));\n  left.para('Each exit lane also has a card reader.');" },
+    run: CHECK_DRAWINGS,
+    names: ["FAIL es, pass holders only: every text on 9 sheets is the drawings' own", '"Each exit lane also has a card reader."'],
+  },
+  {
+    check: 'gate 4: a capitalised name typed into a sheet',
+    plant: { file: 'src/drawings/sheets.js', anchor: "  left.para(t('drawings.about.trade'));", with: "  left.para(t('drawings.about.trade'));\n  left.para('Jane chose these lanes.');" },
+    run: CHECK_DRAWINGS,
+    names: ["FAIL en, any driver: every text on 10 sheets is the drawings' own", '"Jane chose these lanes."'],
+  },
+  {
+    check: 'gate 4: "gate-box" with a hyphen',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera, on the gate-box."' },
+    run: CHECK_DRAWINGS,
+    names: ['"gatebox" in "Front camera, on the gate-box."'],
+  },
+  {
+    check: 'gate 4: "Gate Box" in capitals',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera, on the Gate Box."' },
+    run: CHECK_DRAWINGS,
+    names: ['"gatebox" in "Front camera, on the Gate Box."'],
+  },
+  {
+    check: 'gate 5: a scanner on every lane of a garage that takes any driver',
+    plant: { file: 'src/i18n/en.js', anchor: 'a display, an intercom and a small relay box, and one control panel that holds its wiring.",', with: 'a display, a scanner, an intercom and a small relay box, and one control panel that holds its wiring.",' },
+    run: CHECK_DRAWINGS,
+    // Since fix 11 the "Every lane" check reads its claims as approved (fix 13: from the snapshot), so a claim edited in the dictionary is check 0's to name.
+    names: ['en drawings.about.oneComputer: "One computer sits', 'a display, a scanner, an intercom', 'snapshot "One computer sits'],
+  },
+  {
+    check: 'sweep: the two "Every lane" claims swapped in the code',
+    plant: { file: 'src/drawings/sheets.js', anchor: "left.para(t(reader ? 'drawings.about.alsoAtExit' : 'drawings.about.alsoEveryLane'));", with: "left.para(t(reader ? 'drawings.about.alsoEveryLane' : 'drawings.about.alsoAtExit'));" },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en, any driver: "Every lane" says what each lane has', 'scanner: the sheet says it is on North Entry (2A), whose plan has none'],
+  },
+  {
+    check: 'gate 6: a label back on a line',
+    // L1's label run right from its centre: across the pay station's dashed line, just past the loop.
+    plant: { file: 'src/drawings/plan.js', anchor: "  g.text(l1 + loopW / 2, loopTop - 7, t('drawings.plan.l1', { mark: MARK.L1 }), { ...loopText, anchor: 'middle' });", with: "  g.text(l1 + loopW / 2, loopTop - 7, t('drawings.plan.l1', { mark: MARK.L1 }), loopText);" },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en, any driver: no label crossed by a line', '"L1 arming"'],
+  },
+  {
+    check: 'gate 3: a job with no time limit',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" has no timeout-minutes'],
+  },
+  // ── stems after every non-letter is removed ──
+  {
+    check: '"cardreader" as one word on a pass-only set',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.how2B.shows": "The driver shows a pass to the scanner to get in."', with: '"drawings.how2B.shows": "The driver shows a pass to the scanner or the cardreader to get in."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: pass holders only -> the card reader is named only to say there is none', 'the scanner or the cardreader to get in.'],
+  },
+  {
+    check: '"lectores de tarjetas" on a pass-only set',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.how2B.shows": "El conductor muestra un pase al escáner para entrar."', with: '"drawings.how2B.shows": "El conductor muestra un pase al escáner o a los lectores de tarjetas para entrar."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL es: pass holders only -> the card reader is named only to say there is none', 'a los lectores de tarjetas para entrar.'],
+  },
+  {
+    check: '"lector de tarjeta" on a pass-only set',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.how2B.shows": "El conductor muestra un pase al escáner para entrar."', with: '"drawings.how2B.shows": "El conductor muestra un pase al escáner o al lector de tarjeta para entrar."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL es: pass holders only -> the card reader is named only to say there is none', 'al lector de tarjeta para entrar.'],
+  },
+  {
+    check: '"Card-Reader" on a pass-only set',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.how2B.shows": "The driver shows a pass to the scanner to get in."', with: '"drawings.how2B.shows": "The driver shows a pass to the scanner or the Card-Reader to get in."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL en: pass holders only -> the card reader is named only to say there is none', 'the scanner or the Card-Reader to get in.'],
+  },
+  {
+    check: 'the card reader with no-break spaces on a pass-only set',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.how2B.shows": "El conductor muestra un pase al escáner para entrar."', with: '"drawings.how2B.shows": "El conductor muestra un pase al escáner o al lector\\u00a0de\\u00a0tarjetas para entrar."' },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL es: pass holders only -> the card reader is named only to say there is none', 'tarjetas para entrar.'],
+  },
+  {
+    check: '"gatebox" as one word',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera, on the gatebox."' },
+    run: CHECK_DRAWINGS,
+    names: ['"gatebox" in "Front camera, on the gatebox."'],
+  },
+  {
+    check: '"lanecomputer" as one word',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera, on the lanecomputer."' },
+    run: CHECK_DRAWINGS,
+    names: ['"lanecomputer" in "Front camera, on the lanecomputer."'],
+  },
+  // ── pinned texts, the limit's ceiling ──
+  // Three edits that once stayed green: each exception edited to name a reader.
+  {
+    check: '4: en how2B.noReader edited to "A card reader at the window."',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.how2B.noReader": "No card reader."', with: '"drawings.how2B.noReader": "A card reader at the window."' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.how2B.noReader: "A card reader at the window.", snapshot "No card reader."', 'FAIL en: pass holders only -> the card reader is named only to say there is none', '"A card reader at the window."'],
+  },
+  {
+    check: '4: es type.exitNoReader edited to "Salida, con lector de tarjetas"',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.type.exitNoReader": "Salida, sin lector de tarjetas"', with: '"drawings.type.exitNoReader": "Salida, con lector de tarjetas"' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.type.exitNoReader: "Salida, con lector de tarjetas", snapshot "Salida, sin lector de tarjetas"', 'FAIL es: pass holders only -> the card reader is named only to say there is none', '"Salida, con lector de tarjetas"'],
+  },
+  {
+    check: '4: en entryType.passOnly with "The exit has a card reader." added',
+    plant: { file: 'src/i18n/en.js', anchor: 'No exit lane here has a card reader.",', with: 'No exit lane here has a card reader. The exit has a card reader.",' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.entryType.passOnly: "', 'FAIL en: pass holders only -> the card reader is named only to say there is none', 'The exit has a card reader."'],
+  },
+  {
+    check: '4: es how2B.noReader edited to "Con lector de tarjetas."',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.how2B.noReader": "Sin lector de tarjetas."', with: '"drawings.how2B.noReader": "Con lector de tarjetas."' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.how2B.noReader: "Con lector de tarjetas.", snapshot "Sin lector de tarjetas."', 'FAIL es: pass holders only -> the card reader is named only to say there is none', '"Con lector de tarjetas."'],
+  },
+  // A limit, but no limit.
+  {
+    check: '3: a 6-hour job limit',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '    timeout-minutes: 360\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" may run 360 minutes, over the 30-minute ceiling'],
+  },
+  {
+    check: '3: a 31-minute job limit',
+    plant: { file: '.github/workflows/ci-caches.yml', anchor: '    timeout-minutes: 25\n', with: '    timeout-minutes: 31\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/ci-caches.yml: job "fill" may run 31 minutes, over the 30-minute ceiling'],
+  },
+  // The sweep: the other texts a check took from t(key). A claim's lanes, a unit's words, "3 of 10".
+  {
+    check: 'sweep: en "Every lane" claim edited to speak of every lane',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.about.alsoAtExit": "Each exit lane also has a scanner and a card reader."', with: '"drawings.about.alsoAtExit": "Each lane also has a scanner and a card reader."' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.about.alsoAtExit: "Each lane also has a scanner and a card reader."', 'FAIL en, any driver: "Every lane" says what each lane has'],
+  },
+  {
+    check: 'sweep: es "Every lane" claim edited to speak of every lane',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.about.alsoAtExit": "Cada carril de salida tiene además un escáner y un lector de tarjetas."', with: '"drawings.about.alsoAtExit": "Cada carril tiene además un escáner y un lector de tarjetas."' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.about.alsoAtExit: "Cada carril tiene además un escáner y un lector de tarjetas."', 'FAIL es, any driver: "Every lane" says what each lane has'],
+  },
+  {
+    check: "sweep: en an equipment word the claims are read for",
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.wiring.scanner": "{mark}  Scanner"', with: '"drawings.wiring.scanner": "{mark}  QR scanner"' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.wiring.scanner: "{mark}  QR scanner", snapshot "{mark}  Scanner"'],
+  },
+  {
+    check: "sweep: en a number in a unit's words",
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.unit.turns": "{n} turns"', with: '"drawings.unit.turns": "{n} turns, 7 more"' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.unit.turns: "{n} turns, 7 more", snapshot "{n} turns"', "holds a number that is not the table's"],
+  },
+  {
+    check: "sweep: es a number in a unit's words",
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.unit.volts": "{n} V"', with: '"drawings.unit.volts": "{n} V o 240 V"' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.unit.volts: "{n} V o 240 V", snapshot "{n} V"', "holds a number that is not the table's"],
+  },
+  {
+    check: 'sweep: en a length in the title block\'s "3 of 10"',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.tb.sheetOf": "{n} of {of}"', with: '"drawings.tb.sheetOf": "{n} of {of}, 12 in"' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.tb.sheetOf: "{n} of {of}, 12 in", snapshot "{n} of {of}"', "is not this garage's data"],
+  },
+  {
+    check: '6: the sheets on Letter paper',
+    plant: { file: 'src/drawings/pdf.js', anchor: "export const SHEET = { format: 'tabloid', orientation: 'landscape' };", with: "export const SHEET = { format: 'letter', orientation: 'landscape' };" },
+    run: CHECK_DRAWINGS,
+    names: ['each 11 x 17 in landscape (1224 x 792 points): 792 x 612'],
+  },
+  // ── every drawing string held to one snapshot; limits read as YAML ──
+  // Edits that once stayed green: each changed what a required text says.
+  {
+    check: '1: en plan.payReader says "no card reader"',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.plan.payReader": "{mark}  Pay station: card reader, scanner, intercom"', with: '"drawings.plan.payReader": "{mark}  Pay station: no card reader, scanner, intercom"' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.plan.payReader: "{mark}  Pay station: no card reader, scanner, intercom", snapshot "{mark}  Pay station: card reader, scanner, intercom"'],
+  },
+  {
+    check: '1: es eq.payReader says "sin lector"',
+    plant: { file: 'src/i18n/es.js', anchor: 'del conductor: lector de tarjetas, escáner e intercomunicador."', with: 'del conductor: sin lector de tarjetas, escáner e intercomunicador."' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.eq.payReader: "Estación de pago a la ventanilla del conductor: sin lector de tarjetas', 'snapshot "Estación de pago a la ventanilla del conductor: lector de tarjetas'],
+  },
+  {
+    check: '1: es status "Aprobado para obra"',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.status": "Borrador",', with: '"drawings.status": "Aprobado para obra",' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.status: "Aprobado para obra", snapshot "Borrador"'],
+  },
+  {
+    check: '1: en status "Approved for construction"',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.status": "Draft",', with: '"drawings.status": "Approved for construction",' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.status: "Approved for construction", snapshot "Draft"'],
+  },
+  {
+    check: '1: en everyWay says only the main way in',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.everyWay": "Every way in and every way out of the garage is a lane with this equipment."', with: '"drawings.everyWay": "Only the main way in is a lane with this equipment."' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.everyWay: "Only the main way in is a lane with this equipment.", snapshot "Every way in and every way out of the garage is a lane with this equipment."'],
+  },
+  {
+    check: '1: en entryType.passOnly, punctuation only: "No. Exit lane here has a card reader."',
+    plant: { file: 'src/i18n/en.js', anchor: 'No exit lane here has a card reader.",', with: 'No. Exit lane here has a card reader.",' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.entryType.passOnly: "', 'the driver shows a pass to get in. No. Exit lane here has a card reader.", snapshot "', 'No exit lane here has a card reader."'],
+  },
+  // Changes a reader cannot see.
+  {
+    check: '1: en a no-break space',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Front camera,\\u00a0on the control panel."' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.eq.frontCamera: "Front camera,\\u00a0on the control panel.", snapshot "Front camera, on the control panel."'],
+  },
+  {
+    check: '1: en a Cyrillic "о" in an English word',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Fr\\u043ent camera, on the control panel."' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.eq.frontCamera: "Fr\\u043ent camera, on the control panel.", snapshot "Front camera, on the control panel."'],
+  },
+  {
+    check: '1: es an accent removed',
+    plant: { file: 'src/i18n/es.js', anchor: '"drawings.eq.frontCamera": "Cámara delantera, sobre el panel de control."', with: '"drawings.eq.frontCamera": "Camara delantera, sobre el panel de control."' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.eq.frontCamera: "Camara delantera, sobre el panel de control.", snapshot "Cámara delantera, sobre el panel de control."'],
+  },
+  {
+    check: '1: en a drawing key added',
+    plant: { file: 'src/i18n/en.js', anchor: '  "drawings.eq.frontCamera": "Front camera, on the control panel.",\n', with: '  "drawings.eq.frontCamera": "Front camera, on the control panel.",\n  "drawings.eq.note": "Ask before you drill.",\n' },
+    run: CHECK_DRAWINGS,
+    names: ['en drawings.eq.note: added, "Ask before you drill.", not in the snapshot'],
+  },
+  {
+    check: '1: es a drawing key deleted',
+    plant: { file: 'src/i18n/es.js', anchor: '  "drawings.draftMark": "Borrador, no apto para construcción",\n', with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['es drawings.draftMark: removed, snapshot "Borrador, no apto para construcción"'],
+  },
+  {
+    check: '1: a look-alike written as itself in the snapshot too',
+    plant: [
+      { file: 'src/i18n/en.js', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Frоnt camera, on the control panel."' },
+      { file: 'scripts/drawings-strings.json', anchor: '"drawings.eq.frontCamera": "Front camera, on the control panel."', with: '"drawings.eq.frontCamera": "Frоnt camera, on the control panel."' },
+    ],
+    run: CHECK_DRAWINGS,
+    names: ['FAIL the snapshot is written the one way'],
+  },
+  {
+    check: '1: the table writes a number the snapshot does not',
+    plant: { file: 'src/drawings/numbers.js', anchor: "truckBack: length(283, '7.2', 'worked'),", with: "truckBack: length(283, '7.3', 'worked')," },
+    run: CHECK_DRAWINGS,
+    names: ['en: the table now writes "23 ft 7 in (7.3 m)", not in the snapshot', 'es: the snapshot writes "23 pies 7 pulg (7.2 m)", the table no longer does'],
+  },
+  // Job limits, read as YAML: what line matching missed, and the forms a limit can take.
+  {
+    check: '2: a comment after "jobs:" and a 6-hour limit',
+    plant: [
+      { file: '.github/workflows/emails.yml', anchor: 'jobs:\n  emails:\n', with: 'jobs:  # the mail check\n  emails:\n' },
+      { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '    timeout-minutes: 360\n' },
+    ],
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" may run 360 minutes, over the 30-minute ceiling'],
+  },
+  {
+    check: '2: Windows line ends and no limit',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '', crlf: true },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" has no timeout-minutes'],
+  },
+  {
+    check: '2: a limit of "0360"',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '    timeout-minutes: 0360\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" may run 360 minutes, over the 30-minute ceiling'],
+  },
+  {
+    check: '2: a limit that is an expression, not a number',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '    timeout-minutes: ${{ 360 }}\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" has timeout-minutes "${{ 360 }}", not a number of minutes'],
+  },
+  {
+    check: '2: a limit given twice, so the file is not YAML',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    timeout-minutes: 10\n', with: '    timeout-minutes: 10\n    timeout-minutes: 360\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: not readable as YAML (duplicated mapping key)'],
+  },
+  // ── every job on ubuntu-24.04, the release pinned beside it ──
+  {
+    check: '13b: a job on ubuntu-latest',
+    plant: { file: '.github/workflows/emails.yml', anchor: '    runs-on: ubuntu-24.04\n', with: '    runs-on: ubuntu-latest\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/emails.yml: job "emails" runs on "ubuntu-latest", not "ubuntu-24.04"'],
+  },
+  {
+    check: '13b: a job on ubuntu-22.04',
+    plant: { file: '.github/workflows/ci-caches.yml', anchor: '    runs-on: ubuntu-24.04\n', with: '    runs-on: ubuntu-22.04\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/ci-caches.yml: job "fill" runs on "ubuntu-22.04", not "ubuntu-24.04"'],
+  },
+  {
+    check: '13b: a job with no runs-on',
+    plant: { file: '.github/workflows/cla.yml', anchor: '    runs-on: ubuntu-24.04\n', with: '' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/cla.yml: job "', 'runs on nothing named, not "ubuntu-24.04"'],
+  },
+  {
+    check: '13b: a step pinning another Ubuntu release',
+    plant: { file: '.github/workflows/ci-caches.yml', anchor: '          ubuntu-release: noble\n', with: '          ubuntu-release: jammy\n' },
+    run: ['node', 'scripts/check-job-limits.js'],
+    names: ['FAIL workflows/ci-caches.yml: job "fill" pins Ubuntu "jammy", not "noble", the release of ubuntu-24.04'],
+  },
+  // ── nothing restored from a cache is read before it is verified ──
+  {
+    check: 'cache: setup-node asked to cache npm',
+    plant: { file: '.github/actions/npm-packages/action.yml', anchor: "    - uses: actions/setup-node@v4\n      with:\n        node-version: '22'\n", with: "    - uses: actions/setup-node@v4\n      with:\n        node-version: '22'\n        cache: npm\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL actions/npm-packages/action.yml, step 1 (actions/setup-node@v4): actions/setup-node asked to cache restores with no verify step after it'],
+  },
+  {
+    check: 'cache: actions/cache, which restores with nothing between it and the first reader',
+    plant: { file: '.github/workflows/emails.yml', anchor: '      - name: Self-test the guard\n', with: "      - uses: actions/cache@v4\n        with: { path: ~/.npm, key: npm-x }\n      - name: Self-test the guard\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL workflows/emails.yml, job "emails", step 2 (actions/cache@v4): actions/cache restores with no verify step after it'],
+  },
+  {
+    check: 'cache: Playwright run between the browsers restore and its verify',
+    plant: {
+      file: '.github/actions/check-environment/action.yml',
+      anchor: "-v3\n    - name: Chromium and its system packages, verified before anything reads them\n",
+      with: "-v3\n    - name: Chromium, installed\n      if: inputs.browser == 'true'\n      shell: bash\n      run: npx playwright install chromium\n    - name: Chromium and its system packages, verified before anything reads them\n",
+    },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL actions/check-environment/action.yml, step 3 "Chromium and its system packages, from the cache": the step after it is not the verify step', 'it is step 4 "Chromium, installed"'],
+  },
+  {
+    check: 'cache: the browsers left out of their verify step',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: 'restored chromium "$KEY" "$MATCHED" "$HOME/chromium-debs" "$HOME/.cache/ms-playwright"', with: 'restored chromium "$KEY" "$MATCHED" "$HOME/chromium-debs"' },
+    run: CHECK_CACHE_ORDER,
+    names: ['does not verify ~/.cache/ms-playwright, which "chromium-cache" restores'],
+  },
+  {
+    check: 'cache: a verify step under another condition than its restore',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: "    - name: LibreOffice's packages, verified before anything reads them\n      if: inputs.spreadsheet-app == 'true'\n", with: "    - name: LibreOffice's packages, verified before anything reads them\n      if: always()\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['LibreOffice\'s packages, verified before anything reads them": runs under "always()", not the restore\'s "inputs.spreadsheet-app == \'true\'"'],
+  },
+  {
+    check: "cache: a verify step reading another restore's key",
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: '        MATCHED: ${{ steps.readers-cache.outputs.cache-matched-key }}', with: '        MATCHED: ${{ steps.libreoffice-cache.outputs.cache-matched-key }}' },
+    run: CHECK_CACHE_ORDER,
+    names: ['verifies with KEY and MATCHED other than "readers-cache"\'s own cache-primary-key and cache-matched-key'],
+  },
+  {
+    check: 'cache: the wheels restored from another key',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: "-v1\n    - name: The readers' wheels, verified before pip reads them\n", with: "-v1\n        restore-keys: reader-wheels-\n    - name: The readers' wheels, verified before pip reads them\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['restore-keys on a wheels cache; only a set of packages may come from another key'],
+  },
+  // ── the verify step pinned whole; nothing lets a job go on past a refusal ──
+  {
+    check: '|| true after the npm verify line',
+    plant: { file: '.github/actions/npm-packages/action.yml', anchor: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json\n', with: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json || true\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL actions/npm-packages/action.yml, step 4 "The npm packages, verified before npm reads them": run is', 'package-lock.json || true", not'],
+  },
+  {
+    check: '; true after the Chromium verify line',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: `"$RELEASE" $(grep -v '^#' .github/ci-hashes/playwright-deps.txt)\n`, with: `"$RELEASE" $(grep -v '^#' .github/ci-hashes/playwright-deps.txt); true\n` },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL actions/check-environment/action.yml, step 4 "Chromium and its system packages, verified before anything reads them": run is', 'playwright-deps.txt); true", not'],
+  },
+  {
+    check: '|| exit 0 after the wheels verify line',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: 'restored wheels "$KEY" "$MATCHED" "$HOME/reader-wheels" scripts/files/readers.txt\n', with: 'restored wheels "$KEY" "$MATCHED" "$HOME/reader-wheels" scripts/files/readers.txt || exit 0\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['"The readers\' wheels, verified before pip reads them": run is', 'readers.txt || exit 0", not'],
+  },
+  {
+    check: 'set +e; in front of the LibreOffice verify line',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: '      run: python3 -I .github/scripts/verify-installs.py restored debs', with: '      run: set +e; python3 -I .github/scripts/verify-installs.py restored debs' },
+    run: CHECK_CACHE_ORDER,
+    names: ['"LibreOffice\'s packages, from the cache": the step after it is not the verify step'],
+  },
+  {
+    check: 'continue-on-error on the npm verify step',
+    plant: { file: '.github/actions/npm-packages/action.yml', anchor: '    - name: The npm packages, verified before npm reads them\n      shell: bash\n', with: '    - name: The npm packages, verified before npm reads them\n      continue-on-error: true\n      shell: bash\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL actions/npm-packages/action.yml, runs.steps[3]: continue-on-error true', '"The npm packages, verified before npm reads them": has "continue-on-error", which its pinned step has not'],
+  },
+  {
+    check: 'continue-on-error on a job',
+    plant: { file: '.github/workflows/ci.yml', anchor: '    name: lint\n', with: '    name: lint\n    continue-on-error: true\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL workflows/ci.yml, jobs.lint: continue-on-error true; a failed step must stop its job'],
+  },
+  {
+    check: 'if: false on the wheels verify step',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: "    - name: The readers' wheels, verified before pip reads them\n      shell: bash\n", with: "    - name: The readers' wheels, verified before pip reads them\n      if: false\n      shell: bash\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['"The readers\' wheels, verified before pip reads them": has "if", which its pinned step has not'],
+  },
+  {
+    check: 'if: always() on the step after the wheels verify',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: '    - name: The readers the downloaded files are read back with (pinned, by hash)\n      shell: bash\n', with: '    - name: The readers the downloaded files are read back with (pinned, by hash)\n      if: always()\n      shell: bash\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['"The readers the downloaded files are read back with (pinned, by hash)": runs under "always()", so it runs after the verify step'],
+  },
+  {
+    check: 'shell: bash {0} on the LibreOffice verify step',
+    plant: { file: '.github/actions/check-environment/action.yml', anchor: "    - name: LibreOffice's packages, verified before anything reads them\n      if: inputs.spreadsheet-app == 'true'\n      shell: bash\n", with: "    - name: LibreOffice's packages, verified before anything reads them\n      if: inputs.spreadsheet-app == 'true'\n      shell: bash {0}\n" },
+    run: CHECK_CACHE_ORDER,
+    names: ['"LibreOffice\'s packages, verified before anything reads them": shell is "bash {0}", not "bash"'],
+  },
+  {
+    check: 'a job-level defaults.run.shell',
+    plant: { file: '.github/workflows/ci.yml', anchor: '    name: lint\n', with: '    name: lint\n    defaults:\n      run:\n        shell: bash {0}\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL workflows/ci.yml, jobs.lint: defaults.run.shell "bash {0}"'],
+  },
+  {
+    check: 'a workflow-level defaults.run.shell',
+    plant: { file: '.github/workflows/ci.yml', anchor: 'permissions:\n  contents: read\n', with: 'permissions:\n  contents: read\n\ndefaults:\n  run:\n    shell: bash {0}\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL workflows/ci.yml, the workflow: defaults.run.shell "bash {0}"'],
+  },
+  {
+    check: "a shard's report back on always(), after check-environment",
+    plant: { file: '.github/workflows/ci.yml', anchor: "if: \"!cancelled() && steps.environment.outcome == 'success'\"\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard", with: "if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard" },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL workflows/ci.yml, job "controls", step 4 "This shard\'s report": runs under "always()"', 'the one form allowed is "!cancelled() && steps.environment.outcome == \'success\'"'],
+  },
+  {
+    check: '|| true in the npm verify line and its pinned step both',
+    plant: [
+      { file: '.github/actions/npm-packages/action.yml', anchor: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json\n', with: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json || true\n' },
+      { file: 'scripts/cache-verify-steps.yml', anchor: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json\n', with: 'restored npm "$KEY" "$MATCHED" "$HOME/.npm/_cacache" package-lock.json || true\n' },
+    ],
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL scripts/cache-verify-steps.yml, actions/npm-packages/action.yml "npm-cache": run holds the shell operator "|"'],
+  },
+  {
+    check: 'a pinned verify step no restore uses',
+    plant: { file: 'scripts/cache-verify-steps.yml', anchor: '  npm-cache:\n', with: '  npm-cache-old:\n    name: x\n    shell: bash\n    run: python3 -I .github/scripts/verify-installs.py restored npm x\n  npm-cache:\n' },
+    run: CHECK_CACHE_ORDER,
+    names: ['FAIL scripts/cache-verify-steps.yml, actions/npm-packages/action.yml "npm-cache-old": pinned, but no cache restore of that id is there'],
+  },
+  // The drawn text (check-drawings 10): sheet code that draws another string, drops one or moves rows.
+  {
+    check: 'drawn: the lanes table calls an exit with a reader "no card reader"',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t(reader ? 'drawings.type.exitReader' : 'drawings.type.exitNoReader')", with: "t('drawings.type.exitNoReader')" },
+    run: CHECK_DRAWINGS,
+    names: ['FAIL any driver, en: every text drawn on its 10 sheets', 'any driver, en, sheet 4 "Every lane", line ', 'any driver, es, sheet 4 '],
+  },
+  {
+    check: 'drawn: the lanes table calls any-driver entries 2B',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t(reader ? 'drawings.type.entry2A' : 'drawings.type.entry2B')", with: "t('drawings.type.entry2B')" },
+    run: CHECK_DRAWINGS,
+    names: ['any driver, en, sheet 4 "Every lane", line ', 'Entry, type 2B'],
+  },
+  {
+    check: 'drawn: the lanes table calls a pass-only entry 2A',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t(reader ? 'drawings.type.entry2A' : 'drawings.type.entry2B')", with: "t('drawings.type.entry2A')" },
+    run: CHECK_DRAWINGS,
+    names: ['pass holders only, en, sheet 3 "Every lane", line ', 'Entry, type 2A'],
+  },
+  {
+    check: 'drawn: a pass-only garage told it takes any driver',
+    plant: { file: 'src/drawings/sheets.js', anchor: "left.para(t(reader ? 'drawings.entryType.any' : 'drawings.entryType.passOnly'));", with: "left.para(t('drawings.entryType.any'));" },
+    run: CHECK_DRAWINGS,
+    names: ['pass holders only, en, sheet 3 "Every lane", line ', 'pass holders only, es, sheet 3 '],
+  },
+  {
+    check: 'drawn: the 2B "How it works" loses its "no card reader" sentence',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t('drawings.how2B.pedestal', { distance: pay }), t('drawings.how2B.noReader'), ", with: "t('drawings.how2B.pedestal', { distance: pay }), " },
+    run: CHECK_DRAWINGS,
+    names: ['pass holders only, en, sheet 1 "Entry lane, plan view: type 2B', 'pass holders only, es, sheet 1 '],
+  },
+  {
+    check: 'drawn: two values of the electrical table swapped',
+    plant: [
+      { file: 'src/drawings/sheets.js', anchor: "[mark(MARK.W1), t('drawings.power.w1'), t('drawings.power.w1supply', { volts }),", with: "[mark(MARK.W1), t('drawings.power.w1'), t('drawings.power.w2supply')," },
+      { file: 'src/drawings/sheets.js', anchor: "[mark(MARK.W2), t('drawings.power.w2'), t('drawings.power.w2supply'), ''],", with: "[mark(MARK.W2), t('drawings.power.w2'), t('drawings.power.w1supply', { volts }), ''],"},
+    ],
+    run: CHECK_DRAWINGS,
+    names: ['any driver, en, sheet 8 "Electrical", line ', 'pass holders only, es, sheet 7 '],
+  },
+  {
+    check: 'drawn: two rows of the server-room table reordered',
+    plant: {
+      file: 'src/drawings/sheets.js',
+      anchor: "      [t('drawings.room.mainSwitch'), t('drawings.inRoom.mainSwitch')],\n      [t('drawings.room.backup'), t('drawings.inRoom.backup')],\n",
+      with: "      [t('drawings.room.backup'), t('drawings.inRoom.backup')],\n      [t('drawings.room.mainSwitch'), t('drawings.inRoom.mainSwitch')],\n",
+    },
+    run: CHECK_DRAWINGS,
+    names: ['any driver, en, sheet 6 "Server room", line ', 'long names, es, sheet 6 '],
+  },
+  {
+    check: 'drawn: the same text, drawn elsewhere on the sheet',
+    plant: { file: 'src/drawings/sheets.js', anchor: '  s.text(FRAME.left, 44, title, { size: SIZE.title, bold: true });', with: '  s.text(FRAME.left + 400, 44, title, { size: SIZE.title, bold: true });' },
+    run: CHECK_DRAWINGS,
+    names: ['any driver, en, sheet 1 "Entry lane, plan view: type 2A, a garage that takes any driver" (North Entry), line 1: drawn "430,44 Entry lane'],
+  },
+  {
+    check: 'drawn: a garage that gets a set where it asked for the drivers answer',
+    plant: { file: 'test/drawings-fixtures.js', anchor: "  takesAnyDriver: null,\n", with: "  takesAnyDriver: false,\n" },
+    run: CHECK_DRAWINGS,
+    names: ['no answer, en: asks for "nothing, a set is made", snapshot "drivers"'],
+  },
+  // ── the loops after the gate: L3 to the gate and K3, the confirmation pair L4/L5 past it ──
+  {
+    check: '11 loops after the gate: the confirmation pair L5 not drawn on the plan',
+    plant: { file: 'src/drawings/plan.js', anchor: "  g.text(l5 + loopW / 2, loopTop - 7, MARK.L5, { ...loopText, anchor: 'middle' });\n", with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['"Entry lane, plan view: type 2A, a garage that takes any driver": the confirmation pair L4/L5 is not drawn past L3, or not in the loop table'],
+  },
+  {
+    check: '11 loops after the gate: cable S1 without the confirmation pair',
+    plant: { file: 'src/drawings/sheets.js', anchor: "t('drawings.cable.s1', { marks: [MARK.L0, MARK.L1, MARK.L2, MARK.L4, MARK.L5].join(', ') })", with: "t('drawings.cable.s1', { marks: [MARK.L0, MARK.L1, MARK.L2].join(', ') })" },
+    run: CHECK_DRAWINGS,
+    names: ['"Cabling and network": cable S1 does not carry L4, L5'],
+  },
+  {
+    check: "11 loops after the gate: the closing loop's output K3 dropped from the cable list",
+    plant: { file: 'src/drawings/sheets.js', anchor: "    [mark(MARK.K3), t('drawings.cable.k3', { mark: MARK.L3 }), t('drawings.cable.k3cable'), t('drawings.cable.k3rule')],\n", with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['"Cabling and network": no K3 row for L3\'s output'],
+  },
+  // ── the arming loops before the gate: two, L1 and L2, both occupied together ──
+  {
+    check: '12 arming loops: the arming loop L1 not drawn on the plan',
+    plant: { file: 'src/drawings/plan.js', anchor: '[l1, MARK.L1], ', with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['"Exit lane, plan view": 5 loops drawn, not six (L0 to L5)'],
+  },
+  {
+    check: "12 arming loops: the arming loop L1's label dropped from the plan",
+    plant: { file: 'src/drawings/plan.js', anchor: "  g.text(l1 + loopW / 2, loopTop - 7, t('drawings.plan.l1', { mark: MARK.L1 }), { ...loopText, anchor: 'middle' });\n", with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['"Exit lane, plan view": the arming loop L1 is not drawn'],
+  },
+  {
+    check: '12 arming loops: the wiring rules without "both arming loops occupied together"',
+    plant: { file: 'src/drawings/sheets.js', anchor: "    t('drawings.rule.arming', { marks: `${MARK.L1}, ${MARK.L2}` }),\n", with: '' },
+    run: CHECK_DRAWINGS,
+    names: ['"Control panel and lane wiring": no rule that both arming loops L1, L2 must be occupied together, or the loop detector does not read them'],
+  },
+  // ── the loops as drawn: spaced, in order, under the stopped car (check-drawings 13) ──
+  {
+    check: '13 loops as drawn: L2 drawn closer than the loop spacing to the closing loop L3',
+    plant: { file: 'src/drawings/plan.js', anchor: '[l2, MARK.L2]', with: '[l2 + 20, MARK.L2]' },
+    run: CHECK_DRAWINGS,
+    names: ['"Exit lane, plan view": L2 and L3 are 0.89 m apart, less than 1.22 m'],
+  },
+  {
+    check: '13 loops as drawn: the shortest car the sheet names too short to cover L1',
+    plant: { file: 'src/drawings/numbers.js', anchor: "  shortestCover: length(132, '3.35', 'worked'),", with: "  shortestCover: length(120, '3.05', 'worked')," },
+    run: CHECK_DRAWINGS,
+    names: ['"Exit lane, plan view": the shortest car the sheet names, stopped at the stop line, does not cover the arming loop L1'],
+  },
+  // ── Taxes and fees, Getting paid, Card readers ──
+  {
+    check: 'a percent sent as 185',
+    plant: { file: 'src/taxes.js', anchor: "  const bp = Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0'));", with: "  const bp = Number(m[1]) * 10 + Number((m[2] ?? '').padEnd(1, '0'));" },
+    run: ['node', '--test', 'test/taxes.test.js'],
+    names: ['a percent as typed, in hundredths: 18.5 is 1850'],
+  },
+  {
+    check: "the start of a day in the browser's zone",
+    plant: { file: 'src/taxes.js', anchor: '  const midnight = Date.UTC(y, mo - 1, d);', with: '  return garageInstant(new Date(`${day}T00:00:00`).getTime(), timeZone);\n  const midnight = Date.UTC(y, mo - 1, d);' },
+    run: ['node', '--test', 'test/taxes.test.js'],
+    names: ["FROM THE START OF a day, in the garage's own zone, across both of New York's clock changes"],
+  },
+  {
+    check: 'a state worded wrong',
+    plant: { file: 'src/i18n/en.js', anchor: '"taxes.noTax": "This garage charges no tax.",', with: '"taxes.noTax": "This garage hasn\'t said yet.",' },
+    run: ['node', '--test', 'test/words-in-every-state.test.js'],
+    names: ['en taxes.noTax: "This garage hasn\'t said yet." does not say it'],
+  },
+  {
+    check: 'a refusal with no words of its own, in the client',
+    plant: { file: 'src/api.js', anchor: "  [409, 'card_payments_not_active', 'cardsNotActive'],\n", with: '' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['"readers place, given while card payments are off"'],
+  },
+  {
+    check: 'the change log: a refusal said as "it was not allowed"',
+    plant: { file: 'src/changes.js', anchor: "  'card_payments_not_active', 'bad_location',", with: "  'bad_location'," },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['card_payments_not_active: said as'],
+  },
+  {
+    check: 'the stand-in differs from the platform',
+    plant: { file: 'test/stub-platform.js', anchor: "const NO_PLACE = { error: 'this garage has no Location yet; create it first', code: 'no_terminal_location' };", with: "const NO_PLACE = { error: 'This garage has no place for its readers yet.', code: 'no_terminal_location' };" },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a card reader, with no place given yet"'],
+  },
+  {
+    check: 'a field on Card readers with no description',
+    plant: { file: 'src/i18n/es.js', anchor: '  "readers.code.about": "Las palabras que muestra el lector cuando está listo para conectarse. Nunca se guarda.",\n', with: '' },
+    run: ['node', 'scripts/check-descriptions.js'],
+    names: ['es: readers.code.about (Card readers): missing'],
+  },
+  {
+    check: 'Quick Find: a setting not found',
+    plant: { file: 'src/search.js', anchor: "  { id: 'connectReader', action: { page: 'readers' } },\n", with: '' },
+    run: ['node', '--test', 'test/search.test.js'],
+    names: ['en "connect a card reader"'],
+  },
+  // the stand-in adds a garage as the platform does (test/stub-matches-platform.test.js).
+  {
+    check: 'the stand-in refuses a garage in words the platform does not use',
+    plant: { file: 'test/stub-platform.js', anchor: "const ADD_GARAGE_REFUSED = { error: 'name, timezone and currency are required' };", with: "const ADD_GARAGE_REFUSED = { error: 'a garage needs a name' };" },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a garage, added with no time zone"'],
+  },
+  {
+    check: 'a refused garage said as "something went wrong"',
+    plant: { file: 'src/api.js', anchor: "const GARAGE_BY_STATUS = { 400: 'garageRefused' };", with: 'const GARAGE_BY_STATUS = {};' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['a garage is added with exactly its name', 'a garage, added with no time zone'],
+  },
+  // the stand-in answers the tailgater settings and the banned cars as the platform does.
+  {
+    check: 'the stand-in takes a reach the platform refuses',
+    plant: { file: 'test/stub-platform.js', anchor: "const BAN_REACHES = ['garage', 'all'];", with: "const BAN_REACHES = ['garage', 'all', 'everywhere'];" },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "tailgaters banned, a reach the screens do not offer"'],
+  },
+  {
+    check: 'the stand-in removes a car that is not on the list',
+    plant: { file: 'test/stub-platform.js', anchor: '      if (!found) return refuse(res, who, 404, BANNED_CAR_NOT_FOUND,', with: '      if (!found) return answer(res, 200, { removed: true }); if (!found) return refuse(res, who, 404, BANNED_CAR_NOT_FOUND,' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a banned car not on the list, removed"'],
+  },
+  // the stand-in answers the four doors as the platform does (test/stub-matches-platform.test.js),
+  // and the client says each of their refusals in its own words (test/api.test.js).
+  {
+    check: 'the stand-in says a used invite in words the platform does not use',
+    plant: { file: 'test/stub-platform.js', anchor: "  used: 'This invite was already used. Sign in instead.',", with: "  used: 'This invite has been used.'," },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "invite status, used"'],
+  },
+  {
+    check: 'the stand-in takes a password of 11 characters',
+    plant: { file: 'test/stub-platform.js', anchor: 'const passwordOk = (p) => [...p].length >= 12', with: 'const passwordOk = (p) => [...p].length >= 11' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "invite accept, a password of 11 characters"'],
+  },
+  {
+    check: 'the stand-in ends no session on a reset',
+    plant: { file: 'test/stub-platform.js', anchor: '    for (const sn of sessions.values()) if (sn.owner === who) sn.ended = true;\n', with: '' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "who is signed in, with the session from before the reset"'],
+  },
+  {
+    check: 'an invite used, said as "something went wrong"',
+    plant: { file: 'src/api.js', anchor: "  [409, 'invite_used', 'inviteUsed'],\n", with: '' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['the four doors', 'invite accept, used'],
+  },
+  {
+    check: 'a garage refused for its money, said as "something went wrong"',
+    plant: { file: 'src/api.js', anchor: "  [400, 'garage_currency_refused', 'garageRefused'],\n", with: '' },
+    run: ['node', '--test', 'test/api.test.js'],
+    names: ['a garage is added with exactly its name', 'a garage, added with its money in small letters'],
+  },
+  // the change log sorted and chosen from (test/choose.test.js).
+  {
+    check: 'an action about no kind of thing',
+    plant: { file: 'src/changes.js', anchor: "  lanes: ['lane.add', 'lane.rename', 'lane.remove', 'lane.close', 'lane.close_again', 'lane.reopen'],", with: "  lanes: ['lane.add', 'lane.rename', 'lane.remove', 'lane.close', 'lane.close_again'],"},
+    run: ['node', '--test', 'test/choose.test.js'],
+    names: ['lane.reopen: no kind'],
+  },
+  // ── the Rates form against what the platform stored and the engine charged (test/rates.test.js) ──
+  {
+    check: 'a wrong field in the document',
+    plant: { file: 'src/rates.js', anchor: "max_minor: parseMoney(form.dayMax.price, currency).minor, day_boundary: form.dayMax.kind });", with: "max_minor: parseMoney(form.dayMax.price, currency).minor * 10, day_boundary: form.dayMax.kind });" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ['the document: the approved rates build exactly the documents'],
+  },
+  {
+    check: 'the order of two discounts lost',
+    plant: { file: 'src/rates.js', anchor: "  const adjust = [...list.filter((r) => r.stage === 'ADJUST').map((r) => r.id), ...rules.filter((r) => r.type === FILL_TYPE).map((r) => r.id)];", with: "  const adjust = [...list.filter((r) => r.stage === 'ADJUST').map((r) => r.id).reverse(), ...rules.filter((r) => r.type === FILL_TYPE).map((r) => r.id)];" },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['two discounts apply in the order listed'],
+  },
+  {
+    check: "a finding shown in the engine's words",
+    plant: { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the engine's own sentence reached the screen"],
+  },
+  {
+    check: 'a finding code with no sentence of its own',
+    plant: { file: 'src/i18n/en.js', anchor: '  "rates.finding.CONFLICT_NEGATIVE_TOTAL": "These rates would charge less than nothing.",\n', with: '' },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ['en: no sentence for CONFLICT_NEGATIVE_TOTAL'],
+  },
+  // ── F6: the finding codes, against the engine's own ALL_CODES at the pin ──
+  {
+    check: 'a finding code dropped from these screens',
+    plant: { file: 'src/rates.js', anchor: "  'GAP_NO_TAX_SET_IN_FORCE',\n", with: '' },
+    run: ['node', 'scripts/check-finding-codes.js'],
+    names: ['FAIL GAP_NO_TAX_SET_IN_FORCE: the engine can return it'],
+  },
+  {
+    check: 'a finding code added to the engine',
+    plant: { file: 'scripts/check-finding-codes.js', anchor: '  const engineCodes = readEngineCodes(src);', with: "  const engineCodes = [...readEngineCodes(src), 'GAP_A_CODE_THE_ENGINE_GAINED'];" },
+    run: ['node', 'scripts/check-finding-codes.js'],
+    names: ['FAIL GAP_A_CODE_THE_ENGINE_GAINED: the engine can return it'],
+  },
+  // ── the price table's "most" rows (F1), every typed date (F5), the cheaper way in words (E1) ──
+  // ── the cheaper-way words whatever else applied (G2), the most at equality (G3) ──
+  // ── the form's model (test/rates-two-saves.test.js) ──
+  {
+    check: 'a changed time-based rate loses what the form does not show',
+    plant: { file: 'src/rates.js', anchor: "      const extra = rule.type === 'increment' ? { max_duration_minutes: rule.max_duration_minutes ?? null } : {};", with: '      const extra = {};' },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['what the form does not show is kept'],
+  },
+  {
+    check: 'an empty field no longer keeps the value in force',
+    plant: { file: 'src/rates.js', anchor: "const typedOr = (typed, now) => (String(typed ?? '').trim() !== '' ? typed : now);", with: 'const typedOr = (typed) => typed;' },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['check 8: every field left empty is the rates in force'],
+  },
+  // ── a change carried into rates scheduled to start later (test/rates-carry.test.js) ──
+  {
+    check: 'the days listed with no choice picked',
+    plant: { file: 'src/rates.js', anchor: "  } else if (PRESET_KEYS.includes(s.preset) && !s.days.length) out[`${at}.days`] = 'rates.need.days';", with: "  } else if (!s.days.length) out[`${at}.days`] = 'rates.need.days';" },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ['check 8: nothing prefilled'],
+  },
+  // ── the approved page: the breakdown, the words, the table, the plan written ──
+  {
+    check: "the lines a max brings down shown beside it again",
+    plant: { file: "src/rates.js", anchor: "    if (i < lastCap && line.delta_minor !== 0) return;\n", with: "" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the words: a stay's lines and its special rate"],
+  },
+  {
+    check: "a special that did not fit left unsaid",
+    plant: { file: "src/rates.js", anchor: "  const notFit = windows.filter((r) => !fit(r))", with: "  const notFit = windows.filter(() => false)" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the words: a stay's lines and its special rate"],
+  },
+  {
+    check: "the time-based rate cheaper, said as the special applied",
+    plant: { file: "src/rates.js", anchor: "    else parts.push(t('rates.why.timeLess', { name: name(best), special: money(timeUsed.compared_minor) }));", with: "    else parts.push(t('rates.why.appliedTimeMore', { name: name(best), time: money(timeUsed.compared_minor) }));" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the words: a stay's lines and its special rate"],
+  },
+  {
+    check: "a plan written without a started period charged in full",
+    plant: { file: "src/rates.js", anchor: "  rounding: PERIOD_ROUNDING,\n", with: "" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the document: the approved rates build exactly the documents"],
+  },
+  {
+    check: "a special's leave-by case dropped from the price table",
+    plant: { file: "src/rates.js", anchor: "    if (instantOf(leave, timeZone) !== null) add(`${d}T${r.enter_from}`, wallPlus(leave, 1, timeZone), { key: 'specialLeftLate', name, id: r.id });\n", with: "" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the table: the approved page's stays"],
+  },
+  {
+    check: "a special's stays taken from today, before the table was made",
+    plant: { file: "src/rates.js", anchor: "    for (let n = 1; n <= 400 && d === null; n += 1)", with: "    for (let n = 0; n <= 400 && d === null; n += 1)" },
+    run: ['node', '--test', 'test/rates.test.js'],
+    names: ["the table: the approved page's stays"],
+  },
+  // The fill rule (platform 0034, rate-engine schema 6): each red on its plant.
+  {
+    check: 'fill rule left out of the order of discounts when a special is saved',
+    plant: { file: 'src/rates.js', anchor: "  const adjust = [...list.filter((r) => r.stage === 'ADJUST').map((r) => r.id), ...rules.filter((r) => r.type === FILL_TYPE).map((r) => r.id)];", with: "  const adjust = [...list.filter((r) => r.stage === 'ADJUST').map((r) => r.id)];" },
+    run: ['node', '--test', 'test/fill-rule.test.js'],
+    names: ['the order: a special added, changed or removed on rates with a fill rule keeps it'],
+  },
+  {
+    check: 'fill rule not said beside the rates',
+    plant: { file: 'src/rates.js', anchor: "  for (const rule of rules.filter((r) => r.type === FILL_TYPE)) out.push({ key: rule.id, text: fillWords(t, rule, language) });\n", with: '' },
+    run: ['node', '--test', 'test/fill-rule.test.js'],
+    names: ['the words: the fill rule in plain words beside the rates'],
+  },
+  {
+    check: 'fill rule stays asked with no figure',
+    plant: { file: 'src/rates.js', anchor: '(hasFillRule(plan) ? { ...stay, occupancy_at_entry_bp: 0 } : stay)', with: 'stay' },
+    run: ['node', '--test', 'test/fill-rule.test.js'],
+    names: ['the table: rates with a fill rule price each stay as below it'],
+  },
+  {
+    check: 'fill rule line said as another charge',
+    plant: { file: 'src/rates.js', anchor: "    } else if (line.code === 'fill_level.applied' && rule) {", with: "    } else if (line.code === 'fill_level.applied' && false) {" },
+    run: ['node', '--test', 'test/fill-rule.test.js'],
+    names: ['the lines: a stay the engine raised has its own line in words'],
+  },
+  {
+    check: "a removed special's id left in the order of discounts",
+    plant: { file: "src/rates.js", anchor: "  const adjust = [...list.filter((r) => r.stage === 'ADJUST').map((r) => r.id), ...rules.filter((r) => r.type === FILL_TYPE).map((r) => r.id)];", with: "  const adjust = (base.adjust_order ?? []).concat(list.filter((r) => r.stage === 'ADJUST').map((r) => r.id), rules.filter((r) => r.type === FILL_TYPE).map((r) => r.id)).filter((v, i, a) => a.indexOf(v) === i);" },
+    run: ['node', '--test', 'test/rates-two-saves.test.js'],
+    names: ["the specials, one by one"],
+  },
+  // Platform 0035: what the person signed in may open (src/access.js), passkeys (src/passkeys.js) and the People link.
+  {
+    check: 'access: a change no longer covers its read',
+    plant: { file: 'src/access.js', anchor: "  return verb === 'read' && access.permissions.includes(`${area}:change`);", with: '  return false;' },
+    run: ['node', '--test', 'test/access.test.js'],
+    names: ['a change covers its read; a read never covers a change'],
+  },
+  {
+    check: 'access: the cars let out open without the stays',
+    plant: { file: 'src/access.js', anchor: "  exceptions: ['stays:read', 'lanes:read'],", with: "  exceptions: ['lanes:read']," },
+    run: ['node', '--test', 'test/access.test.js'],
+    names: ['the dashboard ranks, as the linked accounts module gives them, each open their own pages only'],
+  },
+  {
+    check: 'access: the held stuck stays page put back in the page list',
+    plant: { file: 'src/pages.js', anchor: "  // (platform src/held.js). Its old address opens Home.\n", with: "  // (platform src/held.js). Its old address opens Home.\n  { id: 'stuck', path: '/stuck-stays', icon: 'clock' },\n" },
+    run: ['node', '--test', 'test/access.test.js'],
+    names: ['the dashboard ranks, as the linked accounts module gives them, each open their own pages only'],
+  },
+  {
+    check: 'access: an answer with no permissions opens nothing',
+    plant: { file: 'src/access.js', anchor: "  if (!who || typeof who !== 'object' || who.permissions === undefined) return EVERYTHING;", with: "  if (!who || typeof who !== 'object') return EVERYTHING;" },
+    run: ['node', '--test', 'test/access.test.js'],
+    names: ['a platform from before permissions, and the admin, open every page'],
+  },
+  {
+    check: 'access: Home reads the cars inside for someone who may not',
+    plant: { file: 'src/Home.jsx', anchor: '  const inside = useGarageRead(useCallback(readIf(shows.inside, (id) => client.carsInside(id)), [client, shows.inside]), garage.id);\n  const part', with: '  const inside = useGarageRead(useCallback((id) => client.carsInside(id), [client, shows.inside]), garage.id);\n  const part' },
+    run: ['node', '--test', 'test/access.test.js'],
+    names: ['Home makes each read beyond the garages only behind the permission it needs'],
+  },
+  {
+    check: 'access: a sign-in does not ask /auth/me',
+    plant: { file: 'src/api.js', anchor: "      return { ...answer, ...object(await request('/auth/me')) };", with: '      return answer;' },
+    run: ['node', '--test', 'test/passkeys.test.js'],
+    names: ['a password sign-in learns what the person may open from /auth/me', 'signing in with a passkey: the options, the answer to them, and the challenge id sent back'],
+  },
+  {
+    check: 'passkeys: a closed window said as a refusal',
+    plant: { file: 'src/passkeys.js', anchor: "err?.name === 'NotAllowedError' || err?.name === 'AbortError'", with: "err?.name === 'AbortError'" },
+    run: ['node', '--test', 'test/passkeys.test.js'],
+    names: ["the browser's window: closed is 'no passkey used'"],
+  },
+  {
+    check: 'passkeys: a refused passkey said as a wrong password',
+    plant: { file: 'src/api.js', anchor: "code === 'passkey_refused' ? 'passkeyRefused' : 'refused'", with: "'refused'" },
+    run: ['node', '--test', 'test/passkeys.test.js'],
+    names: ['every passkey refusal, and the new refusals of every route, become their own words'],
+  },
+  {
+    check: 'people link: an address that is not https',
+    plant: { file: 'src/extras.js', anchor: "  if (url.protocol !== 'https:' || url.username", with: '  if (url.username' },
+    run: ['node', '--test', 'test/people-link.test.js'],
+    names: ['anything else is no link'],
+  },
+  {
+    check: 'people link: a name and password in the address',
+    plant: { file: 'src/extras.js', anchor: '|| url.username || url.password ||', with: '||' },
+    run: ['node', '--test', 'test/people-link.test.js'],
+    names: ['anything else is no link'],
+  },
+  // Stuck stays after platform 0045: a person's end closes an exit lane's case left open on the stay.
+  // Each change of that round red on its plant.
+  {
+    check: 'stuck: the exit lane payment answers of the end not named',
+    plant: { file: 'src/api.js', anchor: "{ method: 'POST', body, named: END_NAMED }", with: "{ method: 'POST', body }" },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ['each refusal of ending a stay, or of the hours, has words of its own, in both languages'],
+  },
+  {
+    check: 'stuck: the end payment answers named for every route',
+    plant: { file: 'src/api.js', anchor: "  [409, 'stay_not_open', 'stayNotOpen'],\n", with: "  [409, 'stay_not_open', 'stayNotOpen'],\n  [409, 'payment_in_progress', 'stayPaymentInProgress'],\n" },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ["the payment answers are this route's own"],
+  },
+  {
+    check: 'stuck: the refusal the platform no longer gives still named',
+    plant: { file: 'src/api.js', anchor: "  [409, 'stay_not_open', 'stayNotOpen'],\n", with: "  [409, 'stay_not_open', 'stayNotOpen'],\n  [409, 'stay_at_an_exit', 'stayNotOpen'],\n" },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ['the refusal a car at an exit lane once got is gone'],
+  },
+  {
+    check: 'stuck: pass_unasked dropped from the end answer',
+    plant: { file: 'src/api.js', anchor: '        passUnasked: stay.pass_unasked === true,', with: '        passUnasked: false,' },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ['a pass not asked because the garage has no exit lane'],
+  },
+  {
+    check: 'stuck: what a stay that paid at an exit still owes worked out here, not the platform\'s figure',
+    plant: { file: 'src/stuck.js', anchor: '    const figures = { price: money(result.priceMinor), paid, amount: money(result.owedMinor) };', with: '    const figures = { price: money(result.priceMinor), paid, amount: money(Math.max(0, result.priceMinor - result.paid.amountMinor)) };' },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ["a stay that paid at an exit: what it still owes is the platform's figure"],
+  },
+  {
+    check: 'stuck: the price shown as what a stay that paid at an exit owes',
+    plant: { file: 'src/api.js', anchor: '        owedMinor: stay.owed_minor,', with: '        owedMinor: owed?.fee_minor ?? stay.owed_minor,' },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ["a stay that paid at an exit: what it still owes is the platform's figure"],
+  },
+  {
+    check: 'stuck: the reason hint no longer says personal details',
+    plant: { file: 'src/i18n/es.js', anchor: '"stuck.reasonPrivate": "Queda en el registro de cambios: no escriba una placa ni datos personales.",', with: '"stuck.reasonPrivate": "Queda en el registro de cambios: no escriba una placa.",' },
+    run: ['node', '--test', 'test/stuck.test.js'],
+    names: ['the reason field says, in both languages, that the reason goes to the change log'],
+  },
+  {
+    check: 'stuck: what was paid at an exit shown as a setting in the change log',
+    plant: { file: 'src/changes.js', anchor: "  'paid_minor', 'exit_cases_closed',\n", with: "  'exit_cases_closed',\n" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ["a stay ended with an exit lane's case open says what was paid there in money"],
+  },
+  {
+    check: 'stuck: an exit lane case closed shown as a link in the change log',
+    plant: { file: 'src/changes.js', anchor: "    if (field === 'exit_cases_closed') return Array.isArray(value)", with: "    if (field === 'exit_cases_closed' && false) return Array.isArray(value)" },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ["a stay ended with an exit lane's case open says what was paid there in money"],
+  },
+  {
+    check: 'stuck: the stand-in refuses a reason in the words of the platform before #88',
+    plant: { file: 'test/stub-platform.js', anchor: 'at most ${REASON_MAX} characters; no plate -- the reason goes to the change log`', with: 'at most ${REASON_MAX} characters`' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a stay ended, with no reason"'],
+  },
+  {
+    check: 'stuck: the stand-in keeps an exit lane case open when a person ends the stay',
+    plant: { file: 'test/stub-platform.js', anchor: "    const closedCases = exitCase ? [{ exit_id: exitCase.id, payment: paid ? 'succeeded' : exitCase.payment?.status ?? null }] : [];", with: '    const closedCases = [];' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a stay an exit lane has open, ended"'],
+  },
+  // ── The Rates page's money and safety (test/rates.test.js, test/rates-two-saves.test.js, scripts/check-currency-digits.js) ──
+  {
+    check: "a currency's digits asked of the browser again",
+    plant: { file: "src/rates.js", anchor: "export const currencyDigits = (currency) => minorUnitDigits(currency) ?? 2;", with: "export function currencyDigits(currency) {\n  try {\n    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;\n  } catch {\n    return 2;\n  }\n}" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["money in the units the engine reads"],
+  },
+  {
+    check: "the money helpers on the browser's digits, seen by the currency check",
+    plant: { file: "src/rates.js", anchor: "export const currencyDigits = (currency) => minorUnitDigits(currency) ?? 2;", with: "export function currencyDigits(currency) {\n  try {\n    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;\n  } catch {\n    return 2;\n  }\n}" },
+    run: ["node", "scripts/check-currency-digits.js"],
+    names: ["FAIL COP: the money helpers write it with 0 digits, the engine with 2", "FAIL HUF: the money helpers write it with 0 digits, the engine with 2"],
+  },
+  {
+    check: "a currency left out of the engine's table here",
+    plant: { file: "src/currencyDigits.js", anchor: "const THREE_DECIMAL = ['BHD', 'IQD', 'JOD',", with: "const THREE_DECIMAL = ['BHD', 'JOD'," },
+    run: ["node", "scripts/check-currency-digits.js"],
+    names: ["FAIL IQD: the engine prices in it with 3 digits, and src/currencyDigits.js does not have it"],
+  },
+  {
+    check: "a currency with other digits than the engine's",
+    plant: { file: "src/currencyDigits.js", anchor: "const FOUR_DECIMAL = ['CLF', 'UYW'];", with: "const FOUR_DECIMAL = ['CLF', 'UYW', 'KWD'];" },
+    run: ["node", "scripts/check-currency-digits.js"],
+    names: ["FAIL KWD: 4 digits in src/currencyDigits.js, 3 in the engine"],
+  },
+  {
+    check: "a percent's number kept as an amount",
+    plant: { file: "src/rates.js", anchor: "  const keep = kind === was.kind ? was : { value: '', rounding: '' };", with: "  const keep = was;" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a special's amount changed from a percent to an amount"],
+  },
+  {
+    check: "a tick copied from the rates when the owner started",
+    plant: { file: "src/rates.js", anchor: "    dayMax: { on: null, price: '', kind: '' },", with: "    dayMax: { on: _now.dayMax.on, price: '', kind: '' }," },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["two owners"],
+  },
+  {
+    check: "a special's days copied from the rates when the owner started",
+    plant: { file: "src/rates.js", anchor: "  if (now) s.days = null;", with: "  if (now) s.days = [...now.days];" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["two owners"],
+  },
+  {
+    check: "the specials ordered by a comparison that says equal across a special between two discounts",
+    plant: { file: "src/rates.js", anchor: "  return windows.map((r) => (order.includes(r.id) ? stated.shift() : r));", with: "  return windows.sort((a, b) => (order.includes(a.id) && order.includes(b.id) ? order.indexOf(a.id) - order.indexOf(b.id) : 0));" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a special changed on rates with a one-price special between two discounts"],
+  },
+  {
+    check: "a change in the order the discounts apply in left out of What changes",
+    plant: { file: "src/rates.js", anchor: "  if (JSON.stringify(wasOrder) !== JSON.stringify(isOrder)) out.push(", with: "  if (false) out.push(" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a change in the order the discounts apply in is shown"],
+  },
+  {
+    check: "a special no longer in the rates changed or removed all the same",
+    plant: { file: "src/rates.js", anchor: "  if ((change.kind === 'change' || change.kind === 'remove') && !list[change.index]) throw new RatesChangedMeanwhile();\n", with: "" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a special to change or remove that the rates no longer hold"],
+  },
+  {
+    check: "a special the form cannot show changed all the same",
+    plant: { file: "src/rates.js", anchor: "  if (change.kind === 'change' && !formShows(list[change.index])) throw new NotShownHere();\n", with: "" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a special with settings the form cannot show"],
+  },
+  {
+    check: "a special's longest stay read as one the form shows",
+    plant: { file: "src/rates.js", anchor: "  if (rule.effect.kind === 'rate') return (rule.effect.max_duration_minutes ?? null) === null && (rule.effect.rounding ?? PERIOD_ROUNDING) === PERIOD_ROUNDING;", with: "  if (rule.effect.kind === 'rate') return true;" },
+    run: ["node", "--test", "test/rates-two-saves.test.js"],
+    names: ["a special with settings the form cannot show"],
+  },
+  {
+    check: "the rates in force judged by this computer's clock again",
+    plant: { file: "src/rates.js", anchor: "export function arrange(plans) {\n  const sorted = [...(plans ?? [])].sort((a, b) => startOf(a) - startOf(b));\n  const current = sorted.at(-1) ?? null;", with: "export function arrange(plans, now = new Date()) {\n  const sorted = [...(plans ?? [])].sort((a, b) => startOf(a) - startOf(b));\n  const current = sorted.filter((p) => startOf(p) <= now.getTime()).at(-1) ?? null;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the rates in force are the newest stored"],
+  },
+  {
+    check: "a save starting before the rates it is built on",
+    plant: { file: "src/rates.js", anchor: "  return new Date(Number.isFinite(after) ? Math.max(now, after) : now).toISOString();", with: "  return new Date(now).toISOString();" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the rates in force are the newest stored"],
+  },
+  {
+    check: "tax names gathered from every list",
+    plant: { file: "src/taxes.js", anchor: "  const list = Number.isFinite(leftAt) ? arrange(lists, new Date(leftAt)).current : null;\n  for (const rule of list?.rules ?? []) names[rule.id] = rule.label;", with: "  for (const list of lists ?? []) for (const rule of list.rules ?? []) names[rule.id] = rule.label;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["a tax line is named from the list the stay was taxed by"],
+  },
+  {
+    check: "new rates dated by this computer's clock",
+    plant: { file: "src/rates.js", anchor: "  return clock.date + (local - clock.local);", with: "  return local;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["new rates are dated by the platform's clock"],
+  },
+  {
+    check: "the platform's clock not kept from the rates read",
+    plant: { file: "src/api.js", anchor: "      const clock = Number.isFinite(answer.date) ? { date: answer.date, local: Date.now() } : null;", with: "      const clock = null;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["new rates are dated by the platform's clock"],
+  },
+  {
+    check: "the refusal offering a date to choose again",
+    plant: { file: "src/i18n/en.js", anchor: "  \"problem.planStartPast\": \"These rates were dated before now, so nothing was saved. Check that this computer's clock is right, then go back to the rates and check them again.\",", with: "  \"problem.planStartPast\": \"That start has passed. Choose Now or a later date.\"," },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["new rates are dated by the platform's clock"],
+  },
+  {
+    check: "rates dated ahead of the viewer named as later in the file",
+    plant: { file: "src/files/model.js", anchor: "  const groups = [...(current ? [[current, 'current']] : []),", with: "  const groups = [...(current ? [[current, Date.parse(current.effective_from) > readAt.getTime() ? 'later' : 'current']] : [])," },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the Rates file with rates dated ahead of the viewer's clock"],
+  },
+  // ── The two rules of rate setup (decided 2026-10-16): the cheapest price wins; no price past the longest stay (test/rates.test.js) ──
+  {
+    check: "rules: the longest stay a day longer than the engine's",
+    plant: { file: "src/rates.js", anchor: "export const LONGEST_STAY_DAYS = 90;", with: "export const LONGEST_STAY_DAYS = 91;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the rules of rate setup, in both languages"],
+  },
+  {
+    check: "rules: the cheapest price rule in other words",
+    plant: { file: "src/i18n/en.js", anchor: "  \"rates.rule.cheapest\": \"When more than one price applies, the car always pays the cheapest.\",", with: "  \"rates.rule.cheapest\": \"When more than one price applies, the special rate is charged.\"," },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the rules of rate setup, in both languages"],
+  },
+  {
+    check: "rules: the Spanish longest stay with a number of its own",
+    plant: { file: "src/i18n/es.js", anchor: "  \"rates.rule.longest\": \"Las estadías de más de {days} días", with: "  \"rates.rule.longest\": \"Las estadías de más de 90 días" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the rules of rate setup, in both languages"],
+  },
+  {
+    check: "rules: a stay of exactly the longest refused",
+    plant: { file: "src/rates.js", anchor: "  return ms > LONGEST_STAY_DAYS * 86400000;", with: "  return ms >= LONGEST_STAY_DAYS * 86400000;" },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the longest stay: 90 days is priced, a minute more is not"],
+  },
+  {
+    check: "rules: a stay's length read off the garage's clock, not in real time",
+    plant: { file: "src/rates.js", anchor: "  const ms = from !== null && to !== null ? to - from : ", with: "  const ms = false ? to - from : " },
+    run: ["node", "--test", "test/rates.test.js"],
+    names: ["the longest stay: 90 days is priced, a minute more is not"],
+  },
+  // The Exceptions page (platform 0048): each guarantee red on its plant, named by the test that catches it.
+  {
+    check: 'exceptions: the day\'s list oldest first, as the platform gives it',
+    plant: { file: 'src/exceptions.js', anchor: 'Date.parse(b.let_out_at) - Date.parse(a.let_out_at)', with: 'Date.parse(a.let_out_at) - Date.parse(b.let_out_at)' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['the day\'s list, newest first, whatever order it came in'],
+  },
+  {
+    check: 'exceptions: a time on this computer\'s clock, not the garage\'s',
+    plant: { file: 'src/exceptions.js', anchor: '    timeZone,\n    ...(sameDay', with: '    ...(sameDay' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['every time on the garage\'s clock, to the second, with the date when it is not the day\'s'],
+  },
+  {
+    check: 'exceptions: a gate agent record copied twice counted twice',
+    plant: { file: 'src/exceptions.js', anchor: 'if (!was || Number(r.revision) >= Number(was.revision)) byId.set(r[id], r);', with: 'byId.set(`${r[id]}:${copy.id}`, r);' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the list\'s gate agent column, from the platform\'s own summary: counts, not delivered, answered, and where the copy stands'],
+  },
+  {
+    check: 'exceptions: no gate agent set up, not said',
+    plant: { file: 'src/exceptions.js', anchor: "const state = GATE_COPY.includes(summary.copy) ? summary.copy : 'pending';", with: "const state = GATE_COPY.includes(summary.copy) && summary.copy !== 'not_configured' ? summary.copy : 'pending';" },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the list\'s gate agent column, from the platform\'s own summary: counts, not delivered, answered, and where the copy stands'],
+  },
+  {
+    check: 'exceptions: a gate agent not reached, not said',
+    plant: { file: 'src/exceptions.js', anchor: "const state = GATE_COPY.includes(summary.copy) ? summary.copy : 'pending';", with: "const state = GATE_COPY.includes(summary.copy) && summary.copy !== 'not_reachable' ? summary.copy : 'pending';" },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the list\'s gate agent column, from the platform\'s own summary: counts, not delivered, answered, and where the copy stands'],
+  },
+  {
+    check: 'exceptions: deliveries not made left out of the list\'s line',
+    plant: { file: 'src/exceptions.js', anchor: 'if (summary.failed_deliveries > 0) messages =', with: 'if (false) messages =' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the list\'s gate agent column, from the platform\'s own summary: counts, not delivered, answered, and where the copy stands'],
+  },
+  {
+    check: 'exceptions: copies blanked by the retention purge said as none kept',
+    plant: { file: 'src/exceptions.js', anchor: "if (summary.purged) return { state: 'purged'", with: "if (false) return { state: 'purged'" },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the list\'s gate agent column, from the platform\'s own summary: counts, not delivered, answered, and where the copy stands'],
+  },
+  {
+    check: 'exceptions: a picture shown under another kind',
+    plant: { file: 'src/exceptions.js', anchor: 'pictures: [...(Array.isArray(listed[kind]) ? listed[kind] : [])]', with: 'pictures: [...(Array.isArray(listed.lane) ? listed.lane : [])]' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the record\'s pictures, each kind apart, oldest first, with when and where, by the record\'s own ids'],
+  },
+  {
+    check: 'exceptions: a refund at Stripe not said on its payment',
+    plant: { file: 'src/exceptions.js', anchor: 'if (Number(now.refunded_minor) > 0)', with: 'if (false)' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: a refund at Stripe said on its payment, and refunds that could not be checked said on the case'],
+  },
+  {
+    check: 'exceptions: refunds Stripe could not be asked about not said on the case',
+    plant: { file: 'src/exceptions.js', anchor: 'if (Array.isArray(unread) && unread.length)', with: 'if (false)' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: a refund at Stripe said on its payment, and refunds that could not be checked said on the case'],
+  },
+  {
+    check: 'exceptions: an address refused by name said as its delivery\'s state',
+    plant: { file: 'src/exceptions.js', anchor: 'const mine = refused.has(address) ?', with: 'const mine = false ?' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the gate agent\'s messages, address by address: a delivery on its second try, a failed delivery, an address refused, a pager retrying'],
+  },
+  {
+    check: 'exceptions: a failed delivery left out',
+    plant: { file: 'src/exceptions.js', anchor: 'for (const address of d.recipients) {', with: "for (const address of d.state === 'failed' ? [] : d.recipients) {" },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the gate agent\'s messages, address by address: a delivery on its second try, a failed delivery, an address refused, a pager retrying'],
+  },
+  {
+    check: 'exceptions: who answered a call left out',
+    plant: { file: 'src/exceptions.js', anchor: 'if (c.person_answered_at) lines.push(', with: 'if (false) lines.push(' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: the gate agent\'s calls: answered (who rang, who answered, what they pressed), not answered, refused busy'],
+  },
+  {
+    check: 'exceptions: the owner\'s email read as our words, not stored text',
+    plant: { file: 'src/exceptions.js', anchor: 'if (m) return [{ email: m[1] }];', with: 'if (m) return [{ words: m[1] }];' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: who let it out -- the owner by email, the key by its name, a person at the lane -- and as stored text'],
+  },
+  {
+    check: 'exceptions: a payment\'s failure shown as its code',
+    plant: { file: 'src/exceptions.js', anchor: ": sentence(t, 'exceptions.payment.failed'));", with: ': [{ words: String(failure) }]);' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['en: every code the platform or the gate agent can send has its words; none is shown as a code'],
+  },
+  {
+    check: 'exceptions: a day that is not one sent to the platform',
+    plant: { file: 'src/api.js', anchor: "      if (day !== null && !/^\\d{4}-\\d{2}-\\d{2}$/.test(day)) throw new Problem('dayRefused');\n", with: '' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['the day\'s list: the garage\'s own day asked for by its date in the path, today when none; a day that is not one never sent'],
+  },
+  {
+    check: 'exceptions: a record not this garage\'s said as something unexpected',
+    plant: { file: 'src/api.js', anchor: "  [404, 'exception_not_found', 'letOutGone'],\n", with: '' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['the refusals the page can meet, as the platform gives them: each has words of its own in both languages'],
+  },
+  {
+    check: 'exceptions: a reason drawn as markup',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '<bdi>{x.reason}</bdi>', with: '<bdi dangerouslySetInnerHTML={{ __html: x.reason }} />' },
+    run: ['node', '--test', 'test/exceptions.test.js'],
+    names: ['the page only reads: its two calls are GETs, and nothing in it asks for money'],
+  },
+  {
+    check: 'exceptions: another query string built in api.js beside the day\'s',
+    plant: { file: 'src/api.js', anchor: '/exceptions/${encodeURIComponent(letOutId)}`', with: '/exceptions/${encodeURIComponent(letOutId)}?whole=yes`' },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['a query string built in api.js'],
+  },
+  {
+    check: 'exceptions: the day sent as a query again, not in the path',
+    plant: { file: 'src/api.js', anchor: "const named = day === null ? '' : `/day/${encodeURIComponent(day)}`;", with: "const named = day === null ? '' : `?day=${encodeURIComponent(day)}`;" },
+    run: ['node', 'scripts/check-page-stays-home.js'],
+    names: ['a query string built in api.js'],
+  },
+  {
+    check: 'exceptions: the stand-in counts every delivery not made as failed',
+    plant: { file: 'test/stub-platform.js', anchor: ".filter((d) => d.state === 'failed').length,", with: ".filter((d) => d.state !== 'delivered').length," },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "exceptions, today"'],
+  },
+  {
+    check: 'exceptions: the stand-in serves a picture another record lists',
+    plant: { file: 'test/stub-platform.js', anchor: "if (!listed) return answer(res, 404, { error: 'picture not found' });", with: '' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "a picture another record lists, asked through this one"'],
+  },
+  {
+    check: 'exceptions: the stand-in counts a record\'s appended rows short',
+    plant: { file: 'test/stub-platform.js', anchor: '(x.payment_after_let_out ? 1 : 0) + (x.lane_events_after ? 1 : 0),', with: '0,' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "exceptions, today"'],
+  },
+  {
+    check: 'exceptions: the stand-in takes a day that is not on the calendar',
+    plant: { file: 'test/stub-platform.js', anchor: 'at.toISOString().slice(0, 10) !== day) return null;', with: 'false) return null;' },
+    run: ['node', '--test', 'test/stub-matches-platform.test.js'],
+    names: ['the stand-in differs from the platform at "exceptions, a day that is not on the calendar"'],
+  },
+];
+
+const BROWSER_CONTROLS = [
+  // Extra pages from the host, in a browser: the frame follows its page, a change re-reads the step.
+  {
+    check: 'extras: the frame does not follow its page\'s height (browser)',
+    plant: { file: 'src/ExtraPages.jsx', anchor: '      if (m.height !== undefined) setHeight(m.height);', with: '' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL the frame grew with its page'],
+  },
+  {
+    check: 'extras: the step is not read again when its page says something changed (browser)',
+    plant: { file: 'src/ExtraPages.jsx', anchor: '      if (m.changed) onChanged?.();', with: '' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL after the page said something changed, the step was read again: done'],
+  },
+  // The host's menu group, in a browser: a garage first, the name as text, a malformed file changes nothing.
+  {
+    check: 'extras: a menu page draws its frame before a garage is chosen (browser)',
+    plant: [
+      { file: 'src/App.jsx', anchor: '  } else if (!garage) {\n    content = <GaragePicker', with: '  } else if (!garage && !menuEntry) {\n    content = <GaragePicker' },
+      { file: 'src/App.jsx', anchor: '        <ExtraFrame key={`${garage.id}:${menuEntry.id}`} entry={menuEntry} garage={garage}', with: '        <ExtraFrame key={`${garage?.id}:${menuEntry.id}`} entry={menuEntry} garage={garage ?? { id: \'\' }}' },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL with no garage chosen, the page asks for one the admin\'s own way', 'FAIL with no garage chosen, no frame is drawn'],
+  },
+  {
+    check: 'extras: the group\'s name is read as markup (browser)',
+    plant: { file: 'src/App.jsx', anchor: '                      <bdi>{words(g.title)}</bdi>', with: '                      <bdi dangerouslySetInnerHTML={{ __html: words(g.title) }} />' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL and nothing in it was read as markup'],
+  },
+  {
+    check: 'extras: a note\'s words read as markup (browser)',
+    plant: { file: 'src/App.jsx', anchor: '            <bdi>{words(e.note.text)}</bdi>', with: '            <bdi dangerouslySetInnerHTML={{ __html: words(e.note.text) }} />' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL its words are shown as text, never read as markup'],
+  },
+  {
+    check: 'extras: a note shown on every page (browser)',
+    plant: { file: 'src/extras.js', anchor: 'export const notesFor = (extras, pageId) => extras.filter((e) => e.note && e.menu && e.note.page === pageId);', with: 'export const notesFor = (extras) => extras.filter((e) => e.note && e.menu);' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL no note on #/garage-view'],
+  },
+  {
+    check: 'extras: a malformed group list still draws the menu page (browser)',
+    plant: { file: 'src/extras.js', anchor: "  if (!Array.isArray(raw) || raw.length > MAX_GROUPS) return out;", with: "  if (!Array.isArray(raw)) return new Map([['example-group', { id: 'example-group', title: { en: 'x', es: 'x' } }]]);\n  if (raw.length > MAX_GROUPS) return out;" },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-extras.js'],
+    names: ['FAIL with a malformed file, the menu holds nothing of the host'],
+  },
+  // Stuck stays in a browser (scripts/check-stuck.js): held with the page (2026-11-09), not run; its controls come back with it.
+  // The side menu in a browser (src/menu.js): each red on its plant.
+  {
+    check: 'menu: the top in another order (browser)',
+    plant: { file: 'src/menu.js', anchor: "export const TOP = ['home', 'inside', 'alerts'];", with: "export const TOP = ['home', 'alerts', 'inside'];" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Home, Garage View and Alerts at the top, then Setup'],
+  },
+  {
+    check: 'menu: a page left out of Setup (browser)',
+    plant: { file: 'src/menu.js', anchor: '    setup: pages.filter((p) => !TOP.includes(p.id)),', with: "    setup: pages.filter((p) => !TOP.includes(p.id) && p.id !== 'banned')," },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu has "Banned cars"', 'FAIL the menu: Setup holds every other page, in order', 'FAIL the menu: every page once'],
+  },
+  // Platform 0035 in a browser: the menu and the pages follow /auth/me.
+  {
+    check: 'access: the menu lists every page whatever the person may open (browser)',
+    plant: { file: 'src/App.jsx', anchor: '  const menu = menuPages(PAGES.filter((p) => pageOpens(p.id)));', with: '  const menu = menuPages(PAGES);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ["FAIL a linked person's menu does not list #/rates"],
+  },
+  {
+    check: 'access: a page outside the permissions drawn when opened by its address (browser)',
+    plant: { file: 'src/App.jsx', anchor: '  } else if (!menuEntry && !pageOpens(page.id)) {', with: '  } else if (false) {' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL a page outside their permissions, opened by its address'],
+  },
+  {
+    check: 'menu: a group row drawn bold, apart from the page rows (browser)',
+    plant: { file: 'src/styles.css', anchor: '  font-size: 15px;\n  color: var(--text-secondary);\n  cursor: pointer;', with: '  font-size: 15px;\n  font-weight: 600;\n  color: var(--text-secondary);\n  cursor: pointer;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Setup\'s row is drawn as Alerts\' is'],
+  },
+  {
+    check: 'menu: a group row with no icon of its own (browser)',
+    plant: { file: 'src/App.jsx', anchor: "                    <Icon name={own ? 'check' : g.icon} />\n", with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Setup\'s icon sits in the icon column'],
+  },
+  {
+    check: 'menu: a group\'s pages not a step in (browser)',
+    plant: { file: 'src/styles.css', anchor: '.nav-sub .nav-item {\n  padding-inline-start: 42px;', with: '.nav-sub .nav-item {\n  padding-inline-start: 12px;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Setup\'s pages a step in beneath it'],
+  },
+  {
+    check: 'menu: open or closed not kept (browser)',
+    plant: { file: 'src/menu.js', anchor: '    storage?.setItem(MENU_KEY, JSON.stringify(state));', with: '    void state;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Setup opened stays open on Home after a reload'],
+  },
+  {
+    check: 'menu: the group of the page shown does not open itself (browser)',
+    plant: { file: 'src/App.jsx', anchor: '    if (shownIn && !isOpen(openGroups, shownIn)) setGroup(shownIn, true);\n', with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the menu: Setup opens itself when the page shown is inside it'],
+  },
+  // check 6: no screen offers adding a car to the banned list by hand.
+  {
+    check: 'a button that adds a car to the banned list',
+    plant: {
+      file: 'src/BannedPage.jsx',
+      anchor: "      <div className=\"list-head\">\n        <h2 className=\"section-title\">{t('page.banned.title')}</h2>\n",
+      with: "      <div className=\"list-head\">\n        <h2 className=\"section-title\">{t('page.banned.title')}</h2>\n        <button type=\"button\" className=\"link-button\" data-action=\"add-banned\">{t('banned.removeButton')}</button>\n",
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Banned cars: no action but taking a car off -- none adds one (found: add-banned, remove-banned)'],
+  },
+  {
+    check: 'a car taken off the banned list without asking',
+    plant: { file: 'src/BannedPage.jsx', anchor: 'onClick={() => setAsking(car.id)}', with: 'onClick={() => remove(car)}' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Banned cars: taking a car off asks first'],
+  },
+  {
+    check: '6 no request leaves the page',
+    plant: {
+      file: 'index.html',
+      anchor: '    <title></title>\n',
+      with: '    <title></title>\n    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400..700&display=swap" />\n',
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['went outside: https://fonts.googleapis.com/'],
+  },
+  {
+    check: 'nothing raw reaches the screen',
+    // Let one raw code through: the client keeps the platform's code as the
+    // kind, and the note shows a kind it has no words for as it is.
+    plant: [
+      {
+        file: 'src/api.js',
+        anchor: "BY_STATUS[res.status] : undefined) ?? 'unexpected');",
+        with: "BY_STATUS[res.status] : undefined) ?? code ?? 'unexpected');",
+      },
+      {
+        file: 'src/parts.jsx',
+        anchor: '      <p>{t(problemKey({ kind }))}</p>',
+        with: "      <p>{kind.includes('_') ? kind : t(problemKey({ kind }))}</p>",
+      },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL a code the screens do not know', 'RAW on screen: a code ("garage_frozen_for_audit")'],
+  },
+  {
+    check: 'sign-out and 401 clear everything',
+    // Skip the clear: the next owner starts from what the last one left.
+    plant: {
+      file: 'src/owner.js',
+      anchor: 'const cleared = (state) => ({ ...EMPTY_OWNER, epoch: state.epoch + 1 });',
+      with: 'const cleared = (state) => ({ ...state, epoch: state.epoch + 1 });',
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL owner B: nothing of owner A was ever drawn'],
+  },
+  {
+    check: 'the page policy holds',
+    plant: { file: 'index.html', anchor: '    <title></title>\n', with: '    <title></title>\n    <script>window.planted = 1;</script>\n' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL the page policy was never broken (', 'policy violation: '],
+  },
+  {
+    check: 'garage time, not browser time',
+    // Use the browser's zone.
+    plant: {
+      file: 'src/time.js',
+      anchor: '  return new Intl.DateTimeFormat(LOCALES[language] ?? LOCALES.en, { timeZone, ...options }).format(date);',
+      with: '  return new Intl.DateTimeFormat(LOCALES[language] ?? LOCALES.en, { ...options }).format(date);',
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL garage time, not browser time', 'FAIL Garage View: came in at'],
+  },
+  {
+    check: 'garage time on the printed page',
+    // The "Printed …" line in the browser's zone.
+    plant: {
+      file: 'src/time.js',
+      anchor: '  return parts(new Date(value), timeZone, language, {',
+      with: '  return parts(new Date(value), undefined, language, {',
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: [
+      'FAIL print (Garage View): the time it was printed is garage time',
+      'FAIL print (Garage View): the time it was printed is not browser time',
+      'FAIL print (Lanes and equipment): the time it was printed is garage time',
+      'FAIL print (Lanes and equipment): the time it was printed is not browser time',
+    ],
+  },
+  {
+    check: 'the platform cannot be reached, on screen',
+    plant: { file: 'src/api.js', anchor: "    if (GATEWAY.includes(res.status) && !fromPlatform) throw new Problem('unreachable');\n", with: '' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: [
+      'FAIL a gateway answering 502 with a page of its own',
+      'FAIL sign-in, the platform stopped behind the development proxy (en)',
+      'FAIL sign-in, the platform stopped behind the development proxy (es)',
+    ],
+  },
+  {
+    check: 'every sign-in answer has its own words, on screen',
+    plant: { file: 'src/api.js', anchor: "  [429, 'sign_in_rate_limited', 'tooMany'],\n", with: '' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL sign-in, too many tries from here (en)', 'FAIL sign-in, too many tries from here (es)'],
+  },
+  {
+    check: 'English by default, in the browser',
+    // firstLanguage put back: the browser's language decides the first visit.
+    plant: [
+      { file: 'src/i18n/index.js', anchor: 'export function readLanguage(storage) {', with: 'export function readLanguage(storage, browserLanguages) {' },
+      {
+        file: 'src/i18n/index.js',
+        anchor: '  return knownLanguage(stored) ?? DEFAULT_LANGUAGE;',
+        with: "  return knownLanguage(stored) ?? (String(browserLanguages?.[0] ?? '').toLowerCase().startsWith('es') ? 'es' : DEFAULT_LANGUAGE);",
+      },
+      { file: 'src/App.jsx', anchor: 'useState(() => readLanguage(storage));', with: 'useState(() => readLanguage(storage, navigator.languages));' },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL English by default: a first visit from a browser set to Spanish is in English'],
+  },
+  {
+    check: 'kept on the profile',
+    // Saved only to browser storage.
+    plant: {
+      file: 'src/App.jsx',
+      anchor: '      if (signedInNow.current) keepOnProfile(next);\n      else pickedOnSignIn.current = next;',
+      with: '      if (!signedInNow.current) pickedOnSignIn.current = next;',
+    },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL kept on the profile: signed in on a different browser, the owner sees Spanish', 'FAIL kept on the profile: Español chosen while signed in is saved to the profile'],
+  },
+  {
+    check: 'chosen at sign-in is kept',
+    // The save of the language picked on the sign-in screen, dropped.
+    plant: { file: 'src/App.jsx', anchor: '      if (picked && picked !== profile) keepOnProfile(picked);\n', with: '' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL chosen at sign-in: and is saved to the profile, which said English'],
+  },
+  {
+    check: 'a failed save says so',
+    // The sentence never shown.
+    plant: { file: 'src/App.jsx', anchor: '          {languageNotKept ? (', with: '          {false && languageNotKept ? (' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL a failed save, the platform stopped', 'FAIL a failed save, a gateway answering for it', 'FAIL a failed save, a 500'],
+  },
+  {
+    check: 'every field described, on screen',
+    // A column of Garage View named without its description.
+    plant: { file: 'src/InsidePage.jsx', anchor: '                <FieldName t={t} name="inside.ticket" />', with: "                {t('inside.ticket')}" },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL descriptions, Garage View (en)', '"Ticket": no description under it'],
+  },
+  {
+    check: 'every field described, on the print view',
+    // Descriptions hidden when printed.
+    plant: { file: 'src/styles.css', anchor: '  .print-head {\n    display: block;', with: '  .field-about {\n    display: none;\n  }\n  .print-head {\n    display: block;' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL descriptions, print (Garage View) (en)', 'FAIL descriptions, print (Lanes and equipment) (en)'],
+  },
+  {
+    check: 'a cancelled computer is not "no lane computer yet", on screen',
+    plant: { file: 'src/lanes.js', anchor: "  if (cancelled.length === 0) return { state: 'none', text: t('lane.noComputer') };", with: "  return { state: 'none', text: t('lane.noComputer') };" },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Home: a lane whose only computer had its access cancelled says', 'FAIL Home in Spanish: the lane whose only computer was cancelled says'],
+  },
+  {
+    check: 'every state: "no cars inside" beside one let in, on screen',
+    plant: { file: 'src/inside.js', anchor: "  else figure = unconfirmed > 0 ? t('inside.countNoneConfirmed') : t('inside.countNone');", with: "  else figure = t('inside.countNone');" },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Home: none confirmed but one let in says'],
+  },
+  {
+    check: 'the choosers described, on screen',
+    // The choosers' descriptions hidden.
+    plant: { file: 'src/styles.css', anchor: '.chooser > .field-about {\n  max-width: 28ch;', with: '.chooser > .field-about {\n  display: none;\n  max-width: 28ch;' },
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL descriptions, the choosers, sign-in (en)', 'FAIL descriptions, the choosers, Settings (es)', '"Language": its description is not shown'],
+  },
+  {
+    check: 'Quick Find described, on screen',
+    // The description moved above the typing line.
+    plant: [
+      { file: 'src/QuickFind.jsx', anchor: '        <p className="find-about">\n          <FieldAbout t={t} name="quickFind.label" />\n        </p>\n', with: '' },
+      {
+        file: 'src/QuickFind.jsx',
+        anchor: '        <div className="find-input-row">',
+        with: '        <p className="find-about">\n          <FieldAbout t={t} name="quickFind.label" />\n        </p>\n        <div className="find-input-row">',
+      },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL descriptions, Quick Find (en)', 'FAIL descriptions, Quick Find (es)', 'it is not under the typing line, inside the box'],
+  },
+  {
+    check: 'Cars inside: no line says every car listed is parked',
+    // The second gate's finding put back: the line under the title.
+    plant: [
+      {
+        file: 'src/i18n/en.js',
+        anchor: "  'page.inside.purpose': 'Every car your lanes let in that has not left yet, including any not confirmed inside.',",
+        with: "  'page.inside.purpose': 'The cars parked in your garage right now.',",
+      },
+      {
+        file: 'src/i18n/es.js',
+        anchor: "    'Cada carro que sus carriles dejaron pasar y que todavía no ha salido, incluso los no confirmados adentro.',",
+        with: "    'Los carros que están estacionados en su garaje ahora mismo.',",
+      },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    names: [
+      'FAIL Garage View, with a car not confirmed (en)',
+      '"The cars parked in your garage right now."',
+      'FAIL Garage View, with a car not confirmed (es)',
+      '"Los carros que están estacionados en su garaje ahora mismo."',
+    ],
+  },
+  {
+    check: 'Cars inside: no column says every car listed came in',
+    // The second gate's finding put back: the time column named "Came in".
+    plant: [
+      { file: 'src/i18n/en.js', anchor: "  'inside.letIn': 'Let in',", with: "  'inside.letIn': 'Came in'," },
+      { file: 'src/i18n/es.js', anchor: "  'inside.letIn': 'Recibió paso',", with: "  'inside.letIn': 'Entró'," },
+    ],
+    before: [['npx', 'vite', 'build', '--logLevel', 'error']],
+    run: ['node', 'scripts/check-browser.js'],
+    // The column names are drawn in capitals; the check reports what is on screen.
+    names: ['FAIL Garage View, with a car not confirmed (en)', '"CAME IN"', 'FAIL Garage View, with a car not confirmed (es)', '"ENTRÓ"'],
+  },
+  // 'a page with nothing on it yet says so' is RETIRED in Rates was
+  // the last page with nothing on it, and no page in src/pages.js is empty now,
+  // so the plant had no page to show missing. scripts/check-browser.js still
+  // checks the words on any page added later without anything on it.
+  {
+    check: 'garage time in a downloaded file, in the browser',
+    plant: { file: 'src/files/model.js', anchor: "  const parts = new Intl.DateTimeFormat('en-US', {\n    timeZone,\n", with: "  const parts = new Intl.DateTimeFormat('en-US', {\n" },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 2 garage time: inside (en, day): the two stays either side of the clock change at 2026-03-08 15:30:00'],
+  },
+  {
+    check: 'fresh read: the file built from the list the page loaded',
+    plant: {
+      file: 'src/parts.jsx',
+      anchor: '    const data = await read(garageId);\n    const readAt = new Date();\n    flushSync(() => setState({ data, problem: null, readAt }));\n    return { data, readAt };\n  }, [read, garageId]);',
+      with: '    return { data: state.data, readAt: new Date() };\n  }, [state.data]);',
+    },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 6 fresh read: the file and the screen hold the list as it was at the click (NEW0001)'],
+  },
+  {
+    check: 'fresh read: Print without reading the list again',
+    plant: {
+      file: 'src/ListActions.jsx',
+      anchor: '    const asked = client.epoch();\n    try {\n',
+      with: "    const asked = client.epoch();\n    if (what === 'print') {\n      print();\n      working.current = false;\n      setBusy(null);\n      return;\n    }\n    try {\n",
+    },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 6 fresh read: Print read the list again first: the printed page holds NEW0002'],
+  },
+  {
+    check: 'a failed read without its sentence',
+    plant: { file: 'src/ListActions.jsx', anchor: '      {problem ? <ProblemNote t={t} kind={problem} /> : null}', with: '      {null}' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 7 a read that fails (serverError)', 'FAIL 7 a read that fails (gateway)'],
+  },
+  {
+    check: 'the 401 ignored: a file saved after the session ended',
+    plant: [
+      {
+        file: 'src/ListActions.jsx',
+        anchor: '      const { data, readAt } = await refresh();',
+        with: "      const { data, readAt } = await refresh().catch((p) => (p.kind === 'ended' ? { data: window.__kept, readAt: new Date() } : Promise.reject(p)));",
+      },
+      { file: 'src/ListActions.jsx', anchor: "      if (!here.current || client.epoch() !== asked) return;\n      if (what === 'print') {", with: "      if (what === 'print') {" },
+      { file: 'src/ListActions.jsx', anchor: '      // Signed out, or the page left, while it was being made: nothing is saved.\n      if (!here.current || client.epoch() !== asked) return;\n', with: '' },
+      { file: 'src/ListActions.jsx', anchor: '      here.current = false;\n', with: '' },
+      { file: 'src/parts.jsx', anchor: '  return { ...state, retry, refresh };', with: '  window.__kept = state.data ?? window.__kept;\n  return { ...state, retry, refresh };' },
+    ],
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 7 the read answers 401: no file saved (1 saved)'],
+  },
+  {
+    check: 'an inline script, with the downloads',
+    plant: { file: 'index.html', anchor: '    <title></title>\n', with: '    <title></title>\n    <script>window.planted = 1;</script>\n' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 8 the page policy was never broken (', 'policy violation: '],
+  },
+  {
+    check: 'the page policy loosened',
+    plant: { file: 'index.html', anchor: "script-src 'self';", with: "script-src 'self' 'unsafe-eval';" },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL 8 the page policy is exactly as it was, in index.html and in the built page'],
+  },
+  {
+    check: 'one click, one file: pressed again while busy',
+    plant: [
+      { file: 'src/ListActions.jsx', anchor: '    if (working.current) return;\n', with: '' },
+      { file: 'src/ListActions.jsx', anchor: '        disabled={busy !== null}\n', with: '' },
+    ],
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL while busy, none of the three can be pressed', 'FAIL three clicks while one file was being made'],
+  },
+  {
+    check: "printed from the browser's menu: no word of how old the list is",
+    plant: { file: 'src/parts.jsx', anchor: '  const old = readAt && printed - readAt >= AS_OF_MS;', with: '  const old = false;' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ["FAIL printed from the browser's menu a minute after the read"],
+  },
+  {
+    check: "the file's address kept after the save",
+    plant: { file: 'src/ListActions.jsx', anchor: '  setTimeout(() => URL.revokeObjectURL(address), RELEASE_MS);\n', with: '' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ["FAIL each file's address is let go after the save: 0 of"],
+  },
+  {
+    check: 'a lane computer name not kept apart on screen',
+    oddText: true,
+    plant: { file: 'src/LanesPage.jsx', anchor: '                            <bdi>{d.name}</bdi>', with: '                            {d.name}' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL odd text: lane computer name × screen reads in order', 'drawn out of order', 'FAIL odd text: lane computer name × screen:'],
+  },
+  {
+    check: 'the letters the notice names not kept apart',
+    oddText: true,
+    plant: { file: 'src/ListActions.jsx', anchor: '                <bdi data-letter>{shownLetter(ch)}</bdi>', with: '                <span data-letter>{shownLetter(ch)}</span>' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL odd text: garage name × notice (screen) words', 'letters kept apart false'],
+  },
+  {
+    check: "the notice's sentence laid out as separate boxes",
+    oddText: true,
+    plant: [
+      { file: 'src/ListActions.jsx', anchor: '          <span>\n            {before}', with: '          <>\n            {before}' },
+      { file: 'src/ListActions.jsx', anchor: '            {after}\n          </span>', with: '            {after}\n          </>' },
+    ],
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL odd text: garage name × notice (screen) words', 'drawn out of order'],
+  },
+  {
+    check: 'odd characters in a lane name kept in the file, in the browser',
+    oddText: true,
+    plant: [
+      { file: 'src/files/text.js', anchor: "    if (SPACE_LIKE.test(ch)) out += ' ';", with: '    if (SPACE_LIKE.test(ch)) out += ch;' },
+      { file: 'src/files/text.js', anchor: '    else if (LEFT_OUT.some(([, rule]) => rule.test(ch))) hidden = true;', with: '    else if (LEFT_OUT.some(([, rule]) => rule.test(ch))) out += ch;' },
+      { file: 'src/files/text.js', anchor: '    else if (INVISIBLE.test(ch)) hidden = true;', with: '    else if (INVISIBLE.test(ch)) out += ch;' },
+    ],
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL F2 a lane named "Gx<TAB>H2": the PDF prints "Gx H2"', 'the text after the odd character was lost', 'FAIL odd text: lane name × PDF'],
+  },
+  {
+    check: 'the hidden-characters sentence never shown, in the browser',
+    oddText: true,
+    plant: { file: 'src/ListActions.jsx', anchor: '      {left.hidden ? (', with: '      {false ? (' },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL odd text: garage name × notice (screen) (PDF)', 'FAIL odd text: garage name × notice (screen) (Excel)', 'hidden told false, want true'],
+  },
+  {
+    check: 'a long garage name not shortened in the PDF, in the browser',
+    oddText: true,
+    plant: [
+      { file: 'src/files/pdf.js', anchor: "    lines(shortName, 'bold', SIZE.garage);", with: "    lines(fullName, 'bold', SIZE.garage);" },
+      { file: 'src/files/pdf.js', anchor: '      if (!fresh && (room <', with: '      if ((room <' },
+    ],
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL F3 a garage name of 3,000 characters: Download PDF gives a file within 5 s of the click (none in 5 s)'],
+  },
+  {
+    check: 'the garage name before the time in the file name, as shown',
+    oddText: true,
+    plant: { file: 'src/files/model.js', anchor: "  return `${[title, stamp, name].filter(Boolean).join(' - ')}.${extension}`;", with: "  return `${[title, name, stamp].filter(Boolean).join(' - ')}.${extension}`;" },
+    before: BUILD,
+    run: CHECK_DOWNLOADS,
+    names: ['FAIL odd text: garage name × file name (pdf) as shown', 'drawn before the'],
+  },
+  {
+    check: 'a setup step worked out in the admin, not read',
+    plant: { file: 'src/SetupPage.jsx', anchor: "data-done={step.done ? 'yes' : 'no'}", with: "data-done={(step.key === 'lanes' ? step.facts.entry_lanes > 0 && step.facts.exit_lanes > 0 : step.done) ? 'yes' : 'no'}" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Setup: the page shows each step done as the platform says (every done reversed by the platform)', 'differs at lanes'],
+  },
+  // ── on paper, with the browser's default print ──────────
+  {
+    check: "the gate's plant: a tick drawn as a background only",
+    plant: [
+      { file: 'src/styles.css', anchor: "  .no-print,\n  .tick-box,\n", with: '  .no-print,\n' },
+      { file: 'src/styles.css', anchor: '  .print-word {\n    display: inline;\n  }\n', with: '' },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-print.js'],
+    names: ['FAIL en Alerts: printed with backgrounds off', 'not on paper as "Yes', 'FAIL es Alertas: printed with backgrounds off', 'not on paper as "Sí'],
+  },
+  {
+    check: 'a list prints without its name: the refused attempts told apart only by their tint',
+    plant: { file: 'src/styles.css', anchor: "  .no-print,\n  .tick-box,\n", with: "  .no-print,\n  .list-head .section-title,\n  .tick-box,\n" },
+    before: BUILD,
+    run: ['node', 'scripts/check-print.js'],
+    names: ['FAIL en Change log: printed with backgrounds off', 'the list "Refused attempts" names itself, above', 'FAIL es Registro de cambios'],
+  },
+  {
+    check: 'check 2: a removed person shown by the id their lines hold',
+    plant: { file: 'src/changes.js', anchor: "pieces.push({ words: ': ' }, { words: t('changes.person.removed') });", with: "pieces.push({ words: ': ' }, { stored: line.subject.id });" },
+    before: BUILD,
+    run: ['node', 'scripts/check-removed-person.js'],
+    names: ['FAIL en page: "A person who was removed" for each', 'FAIL en PDF: nothing of the removed person', 'FAIL en Excel: nothing of the removed person', 'FAIL es print: nothing of the removed person'],
+  },
+  {
+    check: 'check 2: a removed person shown by the name a line held before',
+    plant: { file: 'test/stub-platform.js', anchor: '        return { ...l, subject: { ...l.subject, name: now ? now.name : null, removed: !now } };', with: "        return { ...l, subject: { ...l.subject, name: now ? now.name : 'Ravi ❺❺❺⓿❶⓿⓿❶❼❼', removed: false } };" },
+    before: BUILD,
+    run: ['node', 'scripts/check-removed-person.js'],
+    names: ['FAIL en page: nothing of the removed person', 'FAIL es Excel: nothing of the removed person', 'FAIL en print: "A person who was removed" for each'],
+  },
+  {
+    check: 'check 2: a row of the printed log split across two sheets',
+    plant: { file: 'src/styles.css', anchor: '  tr {\n    break-inside: avoid;\n  }\n', with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-removed-person.js'],
+    names: ['FAIL en print: every row of the log is kept whole on one sheet (0 of', 'FAIL es print: every row of the log is kept whole on one sheet (0 of'],
+  },
+  {
+    check: 'both answers print, the chosen one only shaded',
+    plant: { file: 'src/styles.css', anchor: "  .tick-box,\n  .segment[aria-checked='false'] {\n", with: '  .tick-box {\n' },
+    before: BUILD,
+    run: ['node', 'scripts/check-print.js'],
+    names: ['FAIL en Setup: printed with backgrounds off', 'the answer not chosen'],
+  },
+  // ── on screen ──────────────────────────────────────────────────────
+  {
+    check: 'the alerts step worked out in the admin, not read',
+    plant: { file: 'src/SetupPage.jsx', anchor: "data-done={step.done ? 'yes' : 'no'}", with: "data-done={(step.key === 'alerts' ? (step.facts.nobody_told ?? []).length === 0 : step.done) ? 'yes' : 'no'}" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Setup: the page shows each step done as the platform says (every done reversed by the platform)', 'differs at alerts'],
+  },
+  {
+    check: 'a text offered to someone with no phone number',
+    plant: { file: 'src/alerts.js', anchor: "export const canText = (person) => typeof person.phone === 'string' && person.phone !== '';", with: 'export const canText = () => true;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Alerts: no text offered to someone with no phone number'],
+  },
+  {
+    check: 'the page does not say first that alerts are not sent yet',
+    plant: { file: 'src/AlertsPage.jsx', anchor: "        <p className=\"warning\" data-notice=\"not-sent-yet\">\n          {t('alerts.notSentYet')}\n        </p>\n", with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Alerts: the first thing it says is'],
+  },
+  {
+    check: 'the phone taken away without saying its texts stop',
+    plant: { file: 'src/AlertsPage.jsx', anchor: '      {changes.phone === null && person.by_text.length ? (', with: '      {false ? (' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Alerts: emptying the phone says first'],
+  },
+  {
+    check: '"lane computer" on a page',
+    plant: { file: 'src/i18n/en.js', anchor: "  'lane.noComputer': 'Not connected yet',", with: "  'lane.noComputer': 'No lane computer yet'," },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL "Home": never "lane computer" (it says "lane computer")'],
+  },
+  {
+    check: 'the connection code written to browser storage',
+    plant: { file: 'src/LanesPage.jsx', anchor: '          setCode(made.code);\n', with: "          setCode(made.code);\n          localStorage.setItem('openparking-admin.lastCode', made.code);\n" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL connection code: browser storage holds only its own keys'],
+  },
+  {
+    check: 'the connection code left on the page after the panel closes',
+    plant: [
+      { file: 'src/LanesPage.jsx', anchor: '          setCode(made.code);\n', with: '          setCode(made.code);\n          window.__code = made.code;\n' },
+      { file: 'src/LanesPage.jsx', anchor: '      <BoardSection t={t} language={language} client={client} garage={garage} lanes={lanes.data.lanes} />\n', with: '      <BoardSection t={t} language={language} client={client} garage={garage} lanes={lanes.data.lanes} />\n      <span hidden>{window.__code}</span>\n' },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL connection code: gone from the page when the panel closes'],
+  },
+  {
+    check: 'the last open lane closed without its warning',
+    plant: { file: 'src/LanesPage.jsx', anchor: "      if (p?.kind === 'lastOpenLane' && !override) setLastOpen(true);", with: "      if (p?.kind === 'lastOpenLane' && !override) send(true);" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lanes and equipment: the last open way in warns'],
+  },
+  {
+    check: 'a confirmation in a browser dialog',
+    plant: { file: 'src/LanesPage.jsx', anchor: "        onClick={async () => {\n          setProblem(null);\n          try {\n            await client.removeLane(lane.id);", with: "        onClick={async () => {\n          if (!window.confirm(t('lanes.removeAsk'))) return;\n          setProblem(null);\n          try {\n            await client.removeLane(lane.id);" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lanes and equipment: every confirmation was on the page, none in a browser dialog'],
+  },
+  {
+    check: "the admin keeps its own quiet number",
+    plant: { file: 'src/time.js', anchor: "  return minutes < quietMinutes ? { state: 'working', minutes } : { state: 'quiet', since: lastSeen };", with: "  return minutes < 5 ? { state: 'working', minutes } : { state: 'quiet', since: lastSeen };" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL ONE SETTING: set to 30 on the platform'],
+  },
+  {
+    check: '"Done" beside a "Yes" that was not pressed',
+    plant: { file: 'src/LanesPage.jsx', anchor: "const CLOSE_WORDS = { remove: 'lanes.panelKeep',", with: "const CLOSE_WORDS = { remove: 'lanes.panelDone'," },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lanes and equipment: the button beside'],
+  },
+  {
+    check: '7: a way out offered "full"',
+    plant: { file: 'src/lanes.js', anchor: "export const reasonsFor = (lane) => (lane.direction === 'exit' ? ['everyone'] : CLOSE_REASONS);", with: 'export const reasonsFor = () => CLOSE_REASONS;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lanes and equipment: a way out offers only'],
+  },
+  {
+    check: '9: a character the screen cannot show, not named as it is typed',
+    plant: { file: 'src/screen.js', anchor: '    if ((upper.length !== 1 || !drawable.has(upper[0])) && !seen.includes(c)) seen.push(c);', with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lanes and equipment: a closing message names each character the screen cannot show', 'FAIL Lane screens: a message names the character'],
+  },
+  {
+    check: '13: a board message sent to no lane',
+    plant: { file: 'src/BoardSection.jsx', anchor: "  const ready = text.trim() !== '' && chosen.length > 0 && cannotShow.length === 0 && !busy;", with: "  const ready = text.trim() !== '' && cannotShow.length === 0 && !busy;" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lane screens: a message with no lane chosen is not sent'],
+  },
+  {
+    check: 'the price switched on for every lane at once',
+    plant: { file: 'src/BoardSection.jsx', anchor: '      await client.setBoardPrices(lane.id, show);', with: '      for (const l of board.data.lanes) await client.setBoardPrices(l.id, show);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lane screens: ...and for that lane only'],
+  },
+  {
+    check: 'a lane removed leaves its lone message on no lane',
+    plant: { file: 'test/stub-platform.js', anchor: '        board.messages = board.messages.filter((msg) => !gone.includes(msg));', with: '        for (const msg of gone) msg.lanes = [];' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lane screens: a lane removed takes its lone message with it'],
+  },
+  {
+    check: 'the board not read again when the lanes change',
+    plant: { file: 'src/BoardSection.jsx', anchor: '    if (lanesBefore.current === lanesNow) return;', with: '    return;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Lane screens: a lane added is offered for a message at once'],
+  },
+  {
+    check: 'a lane the read does not hold, named as nothing',
+    plant: { file: 'src/screen.js', anchor: "  message.lanes.map((id) => lanes.find((l) => l.id === id)).filter((l) => l !== undefined && typeof l.name === 'string' && l.name !== '');", with: "  message.lanes.map((id) => lanes.find((l) => l.id === id) ?? { id, name: '' });" },
+    run: ['node', '--test', 'test/screen.test.js'],
+    names: ['F1: a message is shown at real lanes only'],
+  },
+  {
+    check: 'the messages a lane removal took, not said',
+    plant: { file: 'src/changes.js', anchor: "  if (MESSAGE_LISTS.has(field) && Array.isArray(value)) return value.length ? { stored: value.map((m) => `“${m}”`).join(', ') } : { words: NOTHING };", with: '' },
+    run: ['node', '--test', 'test/change-words.test.js'],
+    names: ['F1: a lane removed says'],
+  },
+  {
+    check: 'refused attempts read among the changes made',
+    plant: { file: 'test/stub-platform.js', anchor: "(l.garage_id === garage.id || l.garage_id === null) && l.outcome === outcome);", with: "(l.garage_id === garage.id || l.garage_id === null) && (outcome === 'done' || l.outcome === outcome));" },
+    before: BUILD,
+    run: ['node', 'scripts/check-browser.js'],
+    names: ['FAIL Change log: no refused attempt among the changes made'],
+  },
+  // ── the installer drawings, in a browser (scripts/check-drawings-browser.js) ──
+  {
+    check: '7: a set made from the last read, with no session',
+    plant: { file: 'src/DrawingsPage.jsx', anchor: '      const { data, readAt } = await drawings.refresh();', with: '      const { data, readAt } = { data: drawings.data, readAt: new Date() };' },
+    before: BUILD,
+    run: ['node', 'scripts/check-drawings-browser.js'],
+    names: ['FAIL session ended: Download PDF saves no file'],
+  },
+  {
+    check: "7: another owner's garage found",
+    plant: {
+      file: 'test/stub-platform.js',
+      anchor: "      const garage = who.garages.find((g) => g.id === m[1]);\n      // The platform's open-stays read",
+      with: "      const garage = Object.values(data).flatMap((o) => o.garages).find((g) => g.id === m[1]);\n      // The platform's open-stays read",
+    },
+    before: BUILD,
+    run: ['node', 'scripts/check-drawings-browser.js'],
+    names: ['FAIL owner B asking for owner A\'s lanes is answered "not found" (200)'],
+  },
+  {
+    check: '1: the page says only the main way in, as the dictionary now says',
+    plant: { file: 'src/i18n/en.js', anchor: '"drawings.everyWay": "Every way in and every way out of the garage is a lane with this equipment."', with: '"drawings.everyWay": "Only the main way in is a lane with this equipment."' },
+    before: BUILD,
+    run: ['node', 'scripts/check-drawings-browser.js'],
+    names: ['FAIL the page says every way in and out is a lane with this equipment, before download'],
+  },
+  // ── Taxes and fees, Getting paid and Card readers, in a browser (scripts/check-money-pages.js) ──
+  {
+    check: "the platform's words on screen",
+    plant: [
+      { file: 'src/api.js', anchor: '    if (!res.ok) {\n      const reasons', with: '    if (!res.ok) {\n      globalThis.platformSaid = data?.error;\n      const reasons' },
+      { file: 'src/parts.jsx', anchor: '      <p>{t(problemKey({ kind }))}</p>', with: '      <p>{t(problemKey({ kind }))} {globalThis.platformSaid}</p>' },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ["FAIL 1 no foreign text (en), Taxes, saving, tax_set_invalid", "the platform's own words on screen"],
+  },
+  {
+    check: "the start of a day in the browser's zone, in the browser",
+    plant: { file: 'src/taxes.js', anchor: '  const midnight = Date.UTC(y, mo - 1, d);', with: '  return garageInstant(new Date(`${day}T00:00:00`).getTime(), timeZone);\n  const midnight = Date.UTC(y, mo - 1, d);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ["FAIL 2 from the start of a day, the night New York's clocks go back", 'T15:00:00.000000Z"; Tokyo\'s would be'],
+  },
+  {
+    check: 'a write that is not POST tax-sets',
+    plant: { file: 'src/api.js', anchor: "{ method: 'POST', body: { tax_set: taxList }, byStatus: TAX_BY_STATUS }", with: "{ method: 'PUT', body: { tax_set: taxList }, byStatus: TAX_BY_STATUS }" },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ['FAIL 3 append-only', 'also PUT /api/v1/garages/'],
+  },
+  {
+    check: "the reader's code in browser storage",
+    plant: { file: 'src/CardReadersPage.jsx', anchor: "        const sent = code.trim();\n", with: "        const sent = code.trim();\n        sessionStorage.setItem('reader', sent);\n" },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ["FAIL 4 the reader's code is not in browser storage (reader=simulated-wpe-u6check-7731)"],
+  },
+  {
+    check: "the reader's code in the address",
+    plant: { file: 'src/CardReadersPage.jsx', anchor: "        const sent = code.trim();\n", with: "        const sent = code.trim();\n        window.history.replaceState(null, '', `${window.location.pathname}?reader=${sent}${window.location.hash}`);\n" },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ["FAIL 4 the reader's code is not in the address"],
+  },
+  {
+    check: 'a garage of pass holders only offered getting paid',
+    // Taken for one that takes any driver: its account read, and its own words dropped.
+    plant: [
+      { file: 'src/GettingPaidPage.jsx', anchor: "  if (answer !== 'any') return { answer };", with: "  if (answer === 'unanswered') return { answer };" },
+      { file: 'src/GettingPaidPage.jsx', anchor: "  if (answer === 'passOnly') {", with: "  if (answer === 'neverSaid') {" },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ['FAIL 5 pass holders only, Getting paid'],
+  },
+  {
+    check: 'a garage of pass holders only shown card readers',
+    // Taken for one that takes any driver: its account read, and its own words dropped.
+    plant: [
+      { file: 'src/CardReadersPage.jsx', anchor: "  if (answer !== 'any') return { answer };", with: "  if (answer === 'unanswered') return { answer };" },
+      { file: 'src/CardReadersPage.jsx', anchor: "  if (answer === 'passOnly') {", with: "  if (answer === 'neverSaid') {" },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ['FAIL 5 pass holders only, Card readers'],
+  },
+  {
+    check: 'the reader form while the account cannot take cards',
+    plant: { file: 'src/CardReadersPage.jsx', anchor: '  const can = takesCards(account);', with: '  const can = Boolean(account);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ['FAIL 5 an account that cannot take cards: no reader form'],
+  },
+  {
+    check: 'the card-readers step of Setup leads nowhere',
+    plant: { file: 'src/setup.js', anchor: "  card_readers: { page: 'readers' },", with: '  card_readers: { notYet: true },' },
+    before: BUILD,
+    run: ['node', 'scripts/check-money-pages.js'],
+    names: ['FAIL Setup: the card_readers step says where it is done'],
+  },
+  // ── the owner's screens tidied (scripts/check-tidy.js) ─────────────
+  {
+    check: 'the Language and Look choosers put back in the top bar',
+    plant: { file: 'src/App.jsx', anchor: '          </div>\n        </header>', with: '          </div>\n          {choosers}\n        </header>' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 1 Home (en): no Language or Look chooser', 'FAIL 1 Garage View (en): no Language or Look chooser', 'in the top bar)'],
+  },
+  {
+    check: 'the old name back: "Cars inside" as the page\'s English name',
+    plant: { file: 'src/i18n/en.js', anchor: "  'page.inside.title': 'Garage View',", with: "  'page.inside.title': 'Cars inside'," },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 2 no shown entry of either dictionary says "Cars inside" or "Carros adentro": en page.inside.title', 'FAIL 2 Garage View printed (en)', "FAIL 2 Garage View's Excel file (en)", 'FAIL 2 Quick Find (en)'],
+  },
+  {
+    check: 'the old name in the files only, in both languages',
+    plant: { file: 'src/files/model.js', anchor: '      titleOf(t, list),\n', with: "      list === 'inside' ? (language === 'es' ? 'Carros adentro' : 'Cars inside') : titleOf(t, list),\n" },
+    before: BUILD,
+    run: TIDY,
+    names: ["FAIL 2 Garage View's Excel file (en)", "FAIL 2 Garage View's PDF file (en)", "FAIL 2 Garage View's Excel file (es)", "FAIL 2 Garage View's PDF file (es)"],
+  },
+  {
+    check: 'a download that takes the page on screen',
+    plant: { file: 'src/files/model.js', anchor: '  const rows = data.sessions.map((s) => [', with: '  const rows = data.sessions.slice(0, 20).map((s) => [' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 3 Garage View (en): Download Excel holds all 312, not the page on screen (20 rows', 'FAIL 3 Garage View (en): Download PDF holds all 312'],
+  },
+  {
+    check: 'a print that holds only the page on screen',
+    plant: { file: 'src/styles.css', anchor: '@media screen {\n  .off-page,\n  .print-only {\n    display: none !important;\n  }\n}', with: '.off-page,\n.print-only {\n  display: none !important;\n}' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 3 Garage View (en): Print holds all 312', 'FAIL 3 the change log (en): Print holds all 312', 'FAIL 3 Alerts, who gets which alert'],
+  },
+  {
+    check: 'a page that skips a row',
+    plant: { file: 'src/parts.jsx', anchor: '  const from = at * PAGE_ROWS;', with: '  const from = at * (PAGE_ROWS + 1);' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 3 Garage View (en): 312 rows, 20 a page over 16 pages', 'missed PG0020'],
+  },
+  {
+    check: "the change log read no further than the platform's first page",
+    plant: { file: 'src/ChangesPage.jsx', anchor: '  } while (next !== null);', with: '  } while (false);' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 3 the change log (en): 312 rows', 'FAIL 3 the change log (en): Download Excel holds all 312'],
+  },
+  {
+    check: 'Download and Print on an empty list',
+    plant: {
+      file: 'src/InsidePage.jsx',
+      anchor: '        {stays.length ? <ListActions t={t} list="inside" language={language} client={client} garage={garage} refresh={inside.refresh} print={print} /> : null}',
+      with: '        <ListActions t={t} list="inside" language={language} client={client} garage={garage} refresh={inside.refresh} print={print} />',
+    },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 4 an empty list shows no Download or Print: inside, empty (download-excel, download-pdf, print)'],
+  },
+  {
+    check: "a person's new address with no Confirm email",
+    plant: { file: 'src/AlertsPage.jsx', anchor: "  const confirming = value.email.trim() !== was.email && value.email.trim() !== '';", with: '  const confirming = false;' },
+    before: BUILD,
+    run: TIDY,
+    names: ["FAIL 5 changing a person's address (en): Confirm email under the new one", "FAIL 5 changing a person's address (en): two different addresses are not saved"],
+  },
+  {
+    check: 'two different addresses saved when a person is added',
+    plant: { file: 'src/AlertsPage.jsx', anchor: '    setTried(true);\n    if (!same) return;\n    setBusy(true);', with: '    setTried(true);\n    setBusy(true);' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 5 adding a person (en): two different addresses are not saved', 'FAIL 5 adding a person (es): two different addresses are not saved'],
+  },
+  {
+    check: 'Home shows the first garage whichever is chosen',
+    plant: { file: 'src/Home.jsx', anchor: '      {garage ? <GarageDetail key={garage.id} t={t} language={language} client={client} garage={garage} shows={shows} /> : null}', with: '      {garage ? <GarageDetail key={garage.id} t={t} language={language} client={client} garage={garages[0]} shows={shows} /> : null}' },
+    before: BUILD,
+    run: TIDY,
+    names: ['FAIL 6 Home, Riverside Deck chosen: its own garage below the list'],
+  },
+  // ── the change log sorted and chosen from, one drawing at a time (scripts/check-choices.js) ──
+  {
+    check: 'the sort done to each page on screen alone',
+    plant: { file: 'src/changes.js', anchor: '  return shown.sort(sort).map((x) => x.line);', with: '  for (let k = 0; k < shown.length; k += 20) shown.splice(k, 20, ...shown.slice(k, k + 20).sort(sort));\n  return shown.map((x) => x.line);' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 1 changes sorted by oldest (en): all 312 in that order across every page', 'FAIL 1 changes sorted by who (en): all 312 in that order across every page'],
+  },
+  {
+    check: 'a download that ignores the choice',
+    plant: { file: 'src/ListActions.jsx', anchor: 'data: shape ? shape(data) : data,', with: 'data,' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 2 changes, two kinds ticked (en): Download Excel holds exactly the 95 lines', 'FAIL 2 changes, two kinds ticked (en): Download PDF holds exactly the 95 lines', 'FAIL 1 changes sorted by oldest (en): Download Excel holds exactly the 312 lines, in the order on screen'],
+  },
+  {
+    check: "the files' head without the choice",
+    plant: { file: 'src/files/model.js', anchor: 'const withChosen = (lines, data) => (data.chosen ? [...lines, data.chosen] : lines);', with: 'const withChosen = (lines) => lines;' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 2 changes, two kinds ticked (en): Download Excel holds exactly the 95 lines, and its head says "Only: lanes, taxes and fees"', 'FAIL 3 refused attempts, two reasons ticked (es): Download PDF'],
+  },
+  {
+    check: 'a tick for a kind of thing the log does not hold',
+    plant: { file: 'src/changes.js', anchor: 'export const kindsIn = (lines) => KIND_ORDER.filter((kind) => lines.some((line) => kindOf(line) === kind));', with: 'export const kindsIn = () => KIND_ORDER;' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 2 changes (en): a tick for each kind of thing the log holds, and no other', 'FAIL 2 changes (es): a tick for each kind'],
+  },
+  {
+    check: 'a reason listed that appears on no line',
+    plant: { file: 'src/changes.js', anchor: '  const keys = [...new Set(lines.map(whyKey))];', with: "  const keys = [...new Set([...lines.map(whyKey), 'not_signed_in'])];" },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 3 refused attempts (en): a tick for each reason the attempts were refused for, and no other', 'FAIL 3 refused attempts (es): a tick for each reason'],
+  },
+  {
+    check: "a single sheet's PDF holding two pages",
+    plant: { file: 'src/drawings/pdf.js', anchor: '  drawSheets(doc, sheets);', with: '  drawSheets(doc, only === null ? sheets : set.sheets.slice(only, only + 2));' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 4 Entry lane, plan view: type 2A, a garage that takes any driver · North Entry (en): Download PDF holds that sheet only', 'FAIL 4 Exit lane, plan view · North Exit (en): Download PDF holds that sheet only'],
+  },
+  {
+    check: 'the refused attempts not cut on screen',
+    plant: { file: 'src/styles.css', anchor: '.cut-text {\n  display: block;\n  overflow: hidden;\n  white-space: nowrap;\n  text-overflow: ellipsis;\n}', with: '.cut-text {\n  display: block;\n}' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 5 refused attempts at 1280 px (en, first page): each of 20 rows one line high', 'FAIL 5 refused attempts at 1280 px (es, first page)'],
+  },
+  {
+    check: 'the refused attempts cut in print',
+    plant: { file: 'src/styles.css', anchor: '@media print {\n  .cut-text {\n    overflow: visible;\n    white-space: normal;\n  }\n}', with: '' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 5 refused attempts printed (en): who, what and why whole', 'FAIL 5 refused attempts printed (es)'],
+  },
+  {
+    check: 'who gets which alert paged by person again',
+    plant: [
+      { file: 'src/AlertsPage.jsx', anchor: '  const paging = usePaging(every.length);', with: '  const paging = usePaging(contacts.length);' },
+      {
+        file: 'src/AlertsPage.jsx',
+        anchor: '<tbody className="no-print">{rows(every.slice(paging.from, paging.to))}</tbody>',
+        with: '<tbody className="no-print">{rows(every.filter((row) => contacts.indexOf(row.person) >= paging.from && contacts.indexOf(row.person) < paging.to))}</tbody>',
+      },
+    ],
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 6 who gets which alert: at most 20 rows a page'],
+  },
+  {
+    check: "Getting paid's Cancel beside its heading again",
+    plant: { file: 'src/styles.css', anchor: '.setup-form > .lane-panel-head {\n  align-self: stretch;\n}', with: '' },
+    before: BUILD,
+    run: CHOICES,
+    names: ['FAIL 7 Getting paid (en): Cancel at the right of its form', 'FAIL 7 Getting paid (es)'],
+  },
+  // ── the Garages page and adding a garage (scripts/check-garages.js) ──
+  {
+    check: 'a row that opens the first garage, whichever is pressed',
+    plant: { file: 'src/App.jsx', anchor: '  const open = (garageId) => {\n    choose(garageId);', with: '  const open = () => {\n    choose(owner.garages[0].id);' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 1 Riverside Deck (en): pressed, it is chosen and its own Setup opens', 'FAIL 1 Riverside Deck (es)'],
+  },
+  {
+    check: 'every garage on one page',
+    plant: { file: 'src/GaragesPage.jsx', anchor: '{garages.slice(paging.from, paging.to).map((g) => (', with: '{garages.map((g) => (' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 1 45 garages (en): 20 a page over 3 pages', 'FAIL 1 45 garages (es)'],
+  },
+  {
+    check: 'a time zone shown as the platform keeps it',
+    plant: { file: 'src/GaragesPage.jsx', anchor: "<td data-zone={garage.timezone}>{zoneWords(t, garage.timezone, language) ?? t('changes.value.anotherZone')}</td>", with: '<td data-zone={garage.timezone}>{garage.timezone}</td>' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 1 two garages (en): both listed', 'Harbor Street Garage zone: "America/New_York", not "Eastern — New York"'],
+  },
+  {
+    check: 'an optional field sent with the three',
+    plant: { file: 'src/api.js', anchor: "{ method: 'POST', body: { name, timezone, currency }, byStatus: GARAGE_BY_STATUS }", with: "{ method: 'POST', body: { name, timezone, currency, transient_available: false }, byStatus: GARAGE_BY_STATUS }" },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 2 it holds exactly name, timezone and currency, as chosen', 'FAIL 2 (es) it holds exactly name, timezone and currency'],
+  },
+  {
+    check: 'a double click that makes two garages',
+    plant: [
+      { file: 'src/GaragesPage.jsx', anchor: '    if (sending.current) return;\n', with: '' },
+      { file: 'src/GaragesPage.jsx', anchor: 'data-action="create-garage" disabled={busy}', with: 'data-action="create-garage"' },
+    ],
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 2 Create garage pressed twice: exactly one POST /garages (2 sent)', 'FAIL 2 (es) Create pressed twice: exactly one POST /garages (2 sent)'],
+  },
+  {
+    check: 'a blank time zone let through and sent',
+    plant: { file: 'src/GaragesPage.jsx', anchor: '  const complete = !missing.name && !missing.zone && !missing.money;', with: '  const complete = !missing.name && !missing.money;' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 3 no time zone (en): nothing sent', 'FAIL 3 no time zone (es): nothing sent'],
+  },
+  {
+    check: 'the money starting blank, not on US dollars',
+    plant: { file: 'src/GaragesPage.jsx', anchor: '  const [money, setMoney] = useState(MONEY_PRESELECTED);', with: "  const [money, setMoney] = useState('');" },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 2 the time zone not picked until the owner picks, the money already US dollars: time zone "", money ""'],
+  },
+  {
+    check: 'a refused garage shown anyway',
+    plant: {
+      file: 'src/GaragesPage.jsx',
+      anchor: "      sending.current = false;\n      setBusy(false);\n      if (p?.kind !== STALE && p?.kind !== 'ended') setProblem(p?.kind ?? 'unexpected');\n      return;",
+      with: "      void p;\n      onAdded({ id: 'refused-0000-4000-8000-000000000000', name: name.trim(), timezone: zone, currency: money, activated_at: null }, null);\n      return;",
+    },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 4 refused (en): one attempt, and it says', 'FAIL 4 refused (en): no garage chosen, still on Home'],
+  },
+  {
+    check: 'an account with no garage: the old sentence alone',
+    plant: { file: 'src/GaragesPage.jsx', anchor: '      <AddGarage t={t} language={language} client={client} onAdded={onAdded} />\n    </div>', with: '    </div>' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 5 no garages (en): every page offers "Add a garage"; not on Home, Setup, Garages'],
+  },
+  {
+    check: 'the refused count "in all" over a choice',
+    plant: { file: 'src/ChangesPage.jsx', anchor: '  if (choice.kinds.length > 0 || choice.whys.length > 0) {', with: '  if (choice === null) {' },
+    before: BUILD,
+    run: GARAGES,
+    names: ['FAIL 6 lanes ticked (en): "24 of 120 refused attempts. They changed nothing."', 'FAIL 6 lanes ticked (es)'],
+  },
+  // ── accepting an invite, a forgotten password, a new one chosen (scripts/check-invites.js) ──
+  {
+    check: 'the form shown for a used invite',
+    plant: {
+      file: 'src/InviteScreen.jsx',
+      anchor: "        if (found.status !== 'ready') return setState({ step: 'status', status: found.status });",
+      with: "        if (found.status !== 'ready' && found.status !== 'used') return setState({ step: 'status', status: found.status });",
+    },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 1 used (en): "This invite was already used. If you made your account with it, sign in.", and no form', 'FAIL 1 used (es)'],
+  },
+  // Found walking the screens against the real platform: its doors answer at a floor of 500 ms,
+  // after the first load's "not signed in", which began a new sign-in and threw the answer away.
+  {
+    check: "an invite's status thrown away when the first load's \"not signed in\" comes back first",
+    plant: { file: 'src/api.js', anchor: "request('/auth/invite/status', { method: 'POST', body: { token }, sessionless: true })", with: "request('/auth/invite/status', { method: 'POST', body: { token } })" },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 1 ready (en): "Accept your invite", with its form', 'FAIL 1 ready (en): the email the invite was sent to, read only (null)'],
+  },
+  {
+    check: 'the token left in the address',
+    plant: { file: 'src/links.js', anchor: "  history.replaceState(null, '', `${location.pathname}${location.search}`);\n", with: '' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 2 ready (en): the address holds no token once it is read', 'FAIL 2 a link opened into an open page'],
+  },
+  {
+    check: 'sent on a mismatch',
+    plant: { file: 'src/links.js', anchor: "  if (first !== second) problems.push('password.differ');\n", with: '' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 3 invite, two that differ (en): nothing sent'],
+  },
+  {
+    check: 'a different sentence for an email with no account',
+    plant: { file: 'src/ForgotScreen.jsx', anchor: "            {t('forgot.sent')}", with: "            {t(typed.includes('nobody') ? 'forgot.intro' : 'forgot.sent')}" },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 4 an email with none (en)', 'FAIL 4 (en): the screen is the same for an email with an account and one with none', 'FAIL 4 (es): the screen is the same'],
+  },
+  {
+    check: 'a reset that leaves the owner signed out with no word',
+    plant: { file: 'src/App.jsx', anchor: "          dispatch({ type: 'drop', notice: 'passwordChanged' });", with: "          dispatch({ type: 'drop', notice: null });" },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 5 changed (en): the sign-in screen, saying "Your password is changed', 'FAIL 5 changed (es): the sign-in screen'],
+  },
+  // Found walking the screens against the real platform: a reset link pasted where Forgot was asked.
+  {
+    check: 'a reset link opened where Forgot was asked lands on Forgot again',
+    plant: { file: 'src/App.jsx', anchor: '          setForgot(false);\n          signedInNow.current = false;', with: '          signedInNow.current = false;' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 5 changed, the link opened where Forgot was asked (en): the sign-in screen, saying so (on: "Forgot your password?")'],
+  },
+  {
+    check: "the old names a browser gives, kept",
+    plant: { file: 'src/garages.js', anchor: 'export const ZONE_RENAMED = {\n', with: 'export const ZONE_RENAMED = {};\nexport const ZONE_RENAMED_NOT_USED = {\n' },
+    before: BUILD,
+    run: INVITES,
+    names: [
+      'FAIL 6 the browser\'s own list (en): no US zone under "Everywhere else", and Indianapolis once',
+      'FAIL 6 the browser\'s own list (en): the browser gives',
+      'FAIL 6 a list holding the old and the new names (es)',
+      'FAIL 6 a garage kept as Asia/Calcutta',
+    ],
+  },
+  {
+    check: "Setup's garage details still \"can't be set from here yet\"",
+    plant: { file: 'src/setup.js', anchor: '  garage_details: { fixed: true },', with: '  garage_details: { notYet: true },' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 7 Setup (en): "Garage details" says', 'FAIL 7 Setup (es)'],
+  },
+  {
+    check: 'Spanish names squeezed beside a long zone',
+    plant: { file: 'src/styles.css', anchor: '.list.garages th:first-child,\n.list.garages td:first-child {\n  min-width: 15em;\n}\n.list.garages td[data-zone] {\n  white-space: normal;\n  min-width: 12em;\n}\n', with: '' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 8 Garages (es, 1280 px)', 'wrapped: Harbor Street Garage'],
+  },
+  // the four the gate measured.
+  {
+    check: "an invite opened while signed in leaves the owner in the invite's language",
+    plant: { file: 'src/App.jsx', anchor: 'onLanguage={(next) => knownLanguage(next) && setInviteLanguage({ token, language: next })}', with: 'onLanguage={(next) => knownLanguage(next) && setLanguage(next)}' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 1 signed in, an English owner, a Spanish invite, left', 'FAIL 1 signed in, a Spanish owner, an English invite, left'],
+  },
+  {
+    check: 'the link-status title on its box',
+    plant: { file: 'src/styles.css', anchor: "  /* The title's gap to its next line, as on every signed-out screen (.page-purpose). */\n  margin-top: 8px;\n", with: '' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 9 the 8 link-status screens', 'invite used (en) 0 px', 'reset invalid (es) 0 px'],
+  },
+  {
+    check: 'the signed-out card wider than a phone',
+    plant: { file: 'src/styles.css', anchor: '  max-width: calc(100% - 32px);\n', with: '' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 10 a phone', 'Sign-in (en, 360 px)', 'the invite, ready (es, 390 px)'],
+  },
+  // Found looking at the screens at 360 px: the choosers above the card ran off the left edge, where nothing scrolls.
+  {
+    check: 'the choosers above the card off the left edge of a phone',
+    plant: { file: 'src/styles.css', anchor: '.signin-top .choosers {\n  flex-wrap: wrap;\n', with: '.signin-top .choosers {\n' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 10 a phone', 'Sign-in (es, 360 px): 360 px wide', 'off the edge: language'],
+  },
+  {
+    check: 'a Setup line in Spanish saying "estacionamiento" again',
+    plant: { file: 'src/i18n/es.js', anchor: '"setup.isOpen": "Este garaje está abierto;', with: '"setup.isOpen": "Este estacionamiento está abierto;' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 7 Setup (es), an open garage and one not', 'Harbor Street Garage, screen: "Este estacionamiento está abierto', 'in the dictionary: setup.isOpen'],
+  },
+  // a reset link opened while signed in; a long invited email on a phone.
+  {
+    check: 'a reset link offers a signed-in owner "Back to sign in" again',
+    plant: {
+      file: 'src/ResetScreen.jsx',
+      anchor: "data-action={signedIn ? 'back-home' : 'back-to-sign-in'} onClick={onLeave}>\n            {signedIn ? t('links.backHome') : t('links.backToSignIn')}",
+      with: 'data-action="back-to-sign-in" onClick={onLeave}>\n            {t(\'links.backToSignIn\')}',
+    },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 11 signed in, a reset link ready (en)', '[["back-to-sign-in","Back to sign in"]]', 'FAIL 11 signed in, a reset link ready (es)'],
+  },
+  {
+    check: "another account's reset said as signing this owner out, the session standing",
+    plant: { file: 'src/ResetScreen.jsx', anchor: "const own = !signedIn || String(done?.email).toLowerCase() === signedInAs.toLowerCase();", with: 'const own = true;' },
+    before: BUILD,
+    run: INVITES,
+    names: ["FAIL 12 signed in, another account's reset done (en)", 'me {"status":200', "FAIL 12 signed in, another account's reset done (es)"],
+  },
+  {
+    check: 'the invited email on one line again, cut at 360 px',
+    plant: { file: 'src/styles.css', anchor: '.field .shown-value {\n  padding: 10px 12px;\n', with: '.field .shown-value {\n  padding: 10px 12px;\n  white-space: nowrap;\n  overflow: hidden;\n' },
+    before: BUILD,
+    run: INVITES,
+    names: ['FAIL 13 a phone, 360 px (en)', '"whole":false', 'FAIL 13 a phone, 360 px (es)'],
+  },
+  // ── the Rates page and the Open button, in a browser (scripts/check-rates.js) ──
+  {
+    check: 'the Open button pressable with a step missing',
+    plant: { file: 'src/SetupPage.jsx', anchor: 'disabled={missing.length > 0} aria-disabled={missing.length > 0}', with: 'disabled={false} aria-disabled={false}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 6 steps missing'],
+  },
+  // ── in a browser: worded ticks (F2), after a refused Open (F3), the real disabled (F4), the start day (F7), the cheaper way (E1) ──
+  {
+    check: 'the worded ticks 28px wide again',
+    plant: { file: 'src/styles.css', anchor: '.tick.tick-words {\n  width: auto;', with: '.tick.tick-words {\n  width: 28px;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    // the approved page: each tick on a row of its own, so a narrow tick overlaps nothing in the form;
+    // the confirmation's words, squeezed, run to many lines.
+    names: ['FAIL F2 es: the confirmation is'],
+  },
+  {
+    check: 'two days of a special drawn over each other',
+    plant: { file: 'src/styles.css', anchor: '.day-ticks {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px 18px;\n}', with: '.day-ticks {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px 18px;\n}\n.day-ticks .tick-row + .tick-row {\n  margin-left: -40px;\n}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL F2 en, a new special, 1280 px', 'days\' centres ticks that day'],
+  },
+  {
+    check: 'Setup not read again after a refused Open',
+    plant: { file: 'src/SetupPage.jsx', anchor: '        await onRefused().catch(() => {});\n', with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL F3 refused: Setup read again'],
+  },
+  {
+    check: 'the Open button with aria-disabled only',
+    plant: { file: 'src/SetupPage.jsx', anchor: 'disabled={missing.length > 0} aria-disabled={missing.length > 0}', with: 'aria-disabled={missing.length > 0}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 6 steps missing', '(not disabled)', '(a press reached the platform)'],
+  },
+  // ── in a browser: Try a stay on a plan with a discount (G2), ticks in their box (G4), the start day's first press (F7) ──
+  {
+    check: "a special's days on one line, running off its box at 360 px",
+    plant: { file: 'src/styles.css', anchor: '.day-ticks {\n  display: flex;\n  flex-wrap: wrap;', with: '.day-ticks {\n  display: flex;\n  flex-wrap: nowrap;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL G4 en, a new special, 360 px'],
+  },
+  {
+    check: "a finding shown in the engine's words, in a browser",
+    plant: [
+      { file: 'src/api.js', anchor: '          code: f.code,\n', with: '          code: f.code,\n          text: f.text,\n' },
+      { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');" },
+    ],
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 5 each finding in a plain sentence'],
+  },
+  // ── the Rates page from the owner's walk, in a browser (scripts/check-rates.js) ──
+  {
+    check: 'the frames: the default fieldset back (its title on the top line)',
+    plant: { file: 'src/styles.css', anchor: 'fieldset.dates > legend {\n  float: left;', with: 'fieldset.dates > legend {\n  float: none;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 1 en, the regular rates, 1280 px', 'its title sits on the top line'],
+  },
+  {
+    check: 'a missing field: the frame colour back to the old one',
+    plant: { file: 'src/styles.css', anchor: ".field[data-wrong='yes'] .when-box input {\n  border: 2px solid var(--line-wrong);", with: ".field[data-wrong='yes'] .when-box input {\n  border: 1px solid var(--border-2);" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 2 en, the regular rates: 3 missing fields, 0 in a red frame'],
+  },
+  {
+    check: 'a missing field: its link jumps nowhere',
+    plant: { file: 'src/RatesPage.jsx', anchor: 'onClick={() => goTo(fieldId(scope, item.at))}', with: 'onClick={() => {}}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 2 en, the regular rates: each of the 3 links goes to its field'],
+  },
+  {
+    check: "a date or time box: the browser's grey digits back",
+    plant: { file: 'src/styles.css', anchor: ".when-box[data-empty='yes'] input:not(:focus),\n.when-box[data-empty='yes'] input:not(:focus)::-webkit-datetime-edit {\n  color: transparent;\n}\n", with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 3 en, no rates yet', 'its own text drawn'],
+  },
+  {
+    check: 'a regular save that drops the specials',
+    plant: { file: 'src/rates.js', anchor: '    if (!REGULAR_TYPES.includes(rule.type)) rules.push(rule);', with: '    if (!REGULAR_TYPES.includes(rule.type)) continue;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 4 the regular rates saved: the specials byte for byte as stored'],
+  },
+  {
+    check: 'a special save that drops the regular rates but the time-based rate',
+    plant: { file: 'src/rates.js', anchor: "    rules: [...rules.filter((r) => r.type !== 'time_window'), ...list],", with: "    rules: [rules.find((r) => r.type === 'increment'), ...list]," },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 4 a special saved: the regular rates byte for byte as stored'],
+  },
+  {
+    check: 'a minutes field without its unit',
+    plant: { file: 'src/RatesPage.jsx', anchor: "  const after = unit === 'minutes' ? t('rates.unit.minutes') : unit === 'percent' ? '%' : null;", with: "  const after = unit === 'percent' ? '%' : null;" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 7 en, the regular rates', 'time-first-minutes shows ""'],
+  },
+  {
+    check: 'the time-based rate prefilled again',
+    plant: { file: 'src/rates.js', anchor: "    time: blankRate(),\n    dayMax: { on: null, price: '', kind: '' },", with: "    time: { ..._now.time },\n    dayMax: { on: null, price: '', kind: '' }," },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 8 en, the regular rates', 'time-first-minutes=60'],
+  },
+  {
+    check: 'a locked button without its reason',
+    plant: { file: 'src/RatesPage.jsx', anchor: '        <span className="locked-reason" data-reason-for={action}>', with: '        <span className="locked-reason" hidden data-reason-for={action}>' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 10 en, no rates yet: ', 'none for: add-special'],
+  },
+  {
+    check: 'the wait cursor back on a locked button',
+    plant: { file: 'src/styles.css', anchor: '.act-row .primary-button:disabled,\n.act-row .link-button:disabled {\n  opacity: 0.45;\n  cursor: not-allowed;\n}', with: '.act-row .primary-button:disabled,\n.act-row .link-button:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL 10 en, the check page before the tick: no wait or progress cursor'],
+  },
+  // ── the gate's F1-F3 and a change carried into rates saved to start later ──
+  {
+    check: 'the calculator keeps its answer after the rates change',
+    plant: { file: 'src/RatesPage.jsx', anchor: '  const stale = Boolean(answer) && answer.key !== askedFor;', with: '  const stale = false;' },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL F1 the special changed after the answer'],
+  },
+  {
+    check: 'the days link back, to a field not on the page',
+    plant: { file: 'src/rates.js', anchor: "  } else if (PRESET_KEYS.includes(s.preset) && !s.days.length) out[`${at}.days`] = 'rates.need.days';", with: "  } else if (!s.days.length) out[`${at}.days`] = 'rates.need.days';" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ['FAIL F3 a new special, nothing picked'],
+  },
+  // ── the approved page, in a browser ──
+  {
+    check: "the tick ignored",
+    plant: { file: "src/RatesPage.jsx", anchor: "  const canConfirm = current_ && ticked && !saving && !blocked;", with: "  const canConfirm = current_ && !saving && !blocked;" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 10 priced, not ticked: Confirm cannot be pressed"],
+  },
+  {
+    check: "a table being priced again accepted",
+    plant: { file: "src/RatesPage.jsx", anchor: "  const canConfirm = current_ && ticked && !saving && !blocked;", with: "  const canConfirm = ticked && !saving && !blocked;" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 12 a stay added while ticked"],
+  },
+  {
+    check: "the check page skipped: the regular rates never checked",
+    plant: { file: "src/RatesPage.jsx", anchor: "          else setReviewing({ kind: 'regular' });", with: "          else setReviewing(null);" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 6 the regular rates: the check page prices its table as it opens"],
+  },
+  {
+    check: "one table price worked out on the page, not by the engine",
+    plant: { file: "src/RatesPage.jsx", anchor: "data-fee={a && !a.refused ? a.fee_minor : undefined}", with: "data-fee={a && !a.refused ? (a.rate_lines ?? []).filter((l) => l.code.startsWith('increment')).reduce((sum, l) => sum + l.delta_minor, 0) || a.fee_minor : undefined}" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 1 the engine's prices, row for row"],
+  },
+  {
+    check: "the calculator's price worked out on the page, not by the engine",
+    plant: { file: "src/RatesPage.jsx", anchor: "    <div className=\"tried\" data-tried=\"priced\" data-fee={stay.fee_minor}>", with: "    <div className=\"tried\" data-tried=\"priced\" data-fee={(stay.rate_lines ?? []).filter((l) => l.code.startsWith('increment')).reduce((sum, l) => sum + l.delta_minor, 0) || stay.fee_minor}>" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 1 the calculator, current rates, dayMax"],
+  },
+  {
+    check: "the price table priced only by a press again",
+    plant: { file: "src/RatesPage.jsx", anchor: "  useEffect(() => {\n    price().catch(() => {});\n  }, [key]);\n", with: "" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 6 the regular rates: the check page prices its table as it opens"],
+  },
+  {
+    check: "who set it: a wrong change-log line matched",
+    plant: { file: "src/RatesPage.jsx", anchor: "          const version = ids.get(line.subject.id);", with: "          const version = [...ids.values()][([...ids.keys()].indexOf(line.subject.id) + 1) % ids.size];" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 9 after five saves"],
+  },
+  {
+    check: "who set it: \"not in the change log\" said before the log is read",
+    plant: { file: "src/RatesPage.jsx", anchor: "  if (!s && !savers.read) return null;\n  if (!s) {", with: "  if (!s) {" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 9 a save just made, its change log still being read"],
+  },
+  {
+    check: "the rates saved to start an hour after Confirm",
+    // The start of a save is saveStart's (the platform's clock, after the rates it is built on).
+    plant: { file: "src/rates.js", anchor: "  return new Date(Number.isFinite(after) ? Math.max(now, after) : now).toISOString();", with: "  return new Date((Number.isFinite(after) ? Math.max(now, after) : now) + 3600_000).toISOString();" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL saved: back on the Rates page"],
+  },
+  {
+    check: "the rates checked against ignored: the newest sent at Confirm",
+    plant: { file: "src/RatesPage.jsx", anchor: "      await client.addRatePlan(garage.id, { ...priced.plan, effective_from: start }, { confirmed: true, basedOn });", with: "      await client.addRatePlan(garage.id, { ...priced.plan, effective_from: start }, { confirmed: true, basedOn: (await client.ratePlans(garage.id)).saved.at(-1)?.id ?? null });" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL P2 refused"],
+  },
+  {
+    check: "the notice's first sentence not bold",
+    plant: { file: "src/RatesPage.jsx", anchor: "          <b>{t('rates.review.noticeBold')}</b> {t('rates.review.noticeRest')}", with: "          {t('rates.review.noticeBold')} {t('rates.review.noticeRest')}" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 8 the notice above the tick, its first sentence bold"],
+  },
+  {
+    check: "a line under the Rates title again",
+    plant: { file: "src/pages.js", anchor: "  { id: 'rates', path: '/rates', icon: 'rate', noPurpose: true },", with: "  { id: 'rates', path: '/rates', icon: 'rate' }," },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL the title alone: no line under \"Rates\""],
+  },
+  {
+    check: "nothing typed: the rates in force checked and saved again",
+    plant: { file: "src/RatesPage.jsx", anchor: "          if (current && regularUntouched(regularTyped, nowForm)) setNothing(true);", with: "          if (false) setNothing(true);" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 8 every field empty"],
+  },
+  {
+    check: "the max per day's breakdown: the lines it brings down shown again",
+    plant: { file: "src/rates.js", anchor: "    if (i < lastCap && line.delta_minor !== 0) return;\n", with: "" },
+    before: BUILD,
+    run: ['node', 'scripts/check-rates.js'],
+    names: ["FAIL 5 32 h 30"],
+  },
+  // ── In a browser: the Rates page when things change under the owner (scripts/check-rates-meanwhile.js) ──
+  {
+    check: "no catcher: a fault while drawing blanks the page (browser)",
+    plant: { file: "src/main.jsx", anchor: "    <PageCatcher storage={storage}>\n      <App theme={theme} storage={storage} client={client} link={link} />\n    </PageCatcher>", with: "    <App theme={theme} storage={storage} client={client} link={link} />" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL catcher: a fault while drawing says"],
+  },
+  {
+    check: "a special removed elsewhere still built on the check page (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "  const editing = special && (special.kind !== 'change' || (editIndex >= 0 && formShows(list[editIndex]))) ? special : null;", with: "  const editing = special;" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL gone: back on the Rates page"],
+  },
+  {
+    check: "Change offered on a special the form cannot show (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "                  {formShows(rule) ? (", with: "                  {true ? (" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL not here: the special written elsewhere has no Change"],
+  },
+  {
+    check: "the rates dated ahead hidden from the page (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "  const { current, earlier } = arrange(plans);", with: "  const { current, earlier } = arrange(plans.filter((p) => Date.parse(p.effective_from) <= now.getTime()));" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL ahead: the rates saved a moment ahead are the rates in force"],
+  },
+  {
+    check: "a save starting before the rates it is built on (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "    const start = saveStart(current, platformNow(clock));\n", with: "    const start = saveStart(null, platformNow(clock));\n" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL ahead: the save starts after the rates it replaces"],
+  },
+  {
+    check: "tax names gathered from every list (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "lineWords(t, stay, plan, taxNamesAt(taxLists, left), garage.currency, language);", with: "lineWords(t, stay, plan, Object.fromEntries(taxLists.flatMap((l) => (l.rules ?? []).map((r) => [r.id, r.label]))), garage.currency, language);" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL taxes: a stay that left in 2031"],
+  },
+  {
+    check: "Confirm dated by this computer's clock (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "    const start = saveStart(current, platformNow(clock));\n", with: "    const start = saveStart(current, Date.now());\n" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL slow: with this computer two minutes slow, Confirm saves"],
+  },
+  {
+    check: "the platform's Date not read from its answer (browser)",
+    plant: { file: "src/api.js", anchor: "    if (dated) return { data, date: Date.parse(res.headers?.get?.('date') ?? '') };", with: "    if (dated) return { data, date: NaN };" },
+    before: BUILD,
+    run: ["node", "scripts/check-rates-meanwhile.js"],
+    names: ["FAIL slow: with this computer two minutes slow, Confirm saves"],
+  },
+  // ── The two rules of rate setup, in a browser (scripts/check-rate-rules.js) ──
+  {
+    check: "rules: not said by the caps (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "        <RateRules t={t} where=\"caps\" />\n", with: "" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL en: the rules by the caps", "FAIL es: the rules by the caps"],
+  },
+  {
+    check: "rules: not said by the special rates (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "      <RateRules t={t} where=\"specials\" />\n", with: "" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL en: the rules by the special rates", "FAIL es: the rules by the special rates"],
+  },
+  {
+    check: "rules: a stay past the longest priced all the same (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "  if (tooLongToPrice(entry, exit, timeZone)) return TOO_LONG;\n", with: "" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL en: calculator: a stay of 90 days and a minute", "FAIL es: calculator: a stay of 90 days and a minute", "FAIL check page: its calculator", "FAIL check page: a stay of 90 days and a minute is not added"],
+  },
+  {
+    check: "rules: the price before kept beside the longest stay's sentence (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "    if (why === TOO_LONG) setAnswer(null);\n", with: "" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL en: calculator: a stay of 90 days and a minute"],
+  },
+  {
+    check: "rules: a stay past the longest added to the price table (browser)",
+    plant: { file: "src/RatesPage.jsx", anchor: "    if (why) return setAddSaid(why);", with: "    if (why && why !== TOO_LONG) return setAddSaid(why);" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL check page: a stay of 90 days and a minute is not added"],
+  },
+  {
+    check: "rules: the two sentences of the rules box run together (browser)",
+    plant: { file: "src/styles.css", anchor: ".rate-rules p + p {\n  margin-top: 6px;\n}\n", with: "" },
+    before: BUILD,
+    run: ["node", "scripts/check-rate-rules.js"],
+    names: ["FAIL en: each rules box: its second sentence 6 px under the first"],
+  },
+  // The Exceptions page (platform 0048), in a browser: each guarantee of scripts/check-exceptions.js red on its plant.
+  {
+    check: 'exceptions: a let-out\'s time on the browser\'s clock (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '{clockSaid(x.let_out_at, garage.timezone, language, shown)}', with: '{new Date(x.let_out_at).toLocaleTimeString()}' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL when it was let out, on the garage\'s clock'],
+  },
+  {
+    check: 'exceptions: the day asked for as this computer\'s today (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: 'useState(null); // null: today', with: 'useState(() => new Date().toISOString().slice(0, 10)); // null: today' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL the first read asks for today unnamed'],
+  },
+  {
+    check: 'exceptions: the day\'s list oldest first (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: 'list.data ? newestFirst(list.data.letOuts) : null', with: 'list.data ? list.data.letOuts : null' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL newest first'],
+  },
+  {
+    check: 'exceptions: the gate agent column said as a count of rows (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '<td data-gate={gate.state}>{gate.text}</td>', with: '<td data-gate={gate.state}>{String(x.records)}</td>' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL the gate agent in a line', 'FAIL "No gate agent is set up for this lane."', 'FAIL "The gate agent could not be reached."', 'FAIL copies removed by the retention purge'],
+  },
+  {
+    check: 'exceptions: the list column read from every story again (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: 'const story = useStory(client, garage.id, open);', with: 'const story = useStory(client, garage.id, open ?? list.data?.letOuts[0]?.id ?? null);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL the column from the list itself: no story read before one is opened'],
+  },
+  {
+    check: 'exceptions: a picture asked through another record (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: 'const path = letOutPicturePath(garage.id, x.id, p.id);', with: 'const path = letOutPicturePath(garage.id, x.exit_id, p.id);' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ["FAIL its pictures, each shown, from its own record's picture route"],
+  },
+  {
+    check: 'exceptions: another day asked for in a query (browser)',
+    plant: { file: 'src/api.js', anchor: "const named = day === null ? '' : `/day/${encodeURIComponent(day)}`;", with: "const named = day === null ? '' : `?day=${encodeURIComponent(day)}`;" },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL asked for by its date in the path, no query'],
+  },
+  {
+    check: 'exceptions: a reason drawn as markup (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '<bdi>{x.reason}</bdi>', with: '<bdi dangerouslySetInnerHTML={{ __html: x.reason }} />' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL the reason shown as words, never as markup'],
+  },
+  {
+    check: 'exceptions: who each message went to, and what became of it, left out (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '{item.deliveries?.length ? (', with: '{false ? (' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL a failed delivery, to whom', 'FAIL an address refused'],
+  },
+  {
+    check: 'exceptions: Previous day skips a day (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: 'go(dayOn(shown, -1))', with: 'go(dayOn(shown, -2))' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL the day before'],
+  },
+  {
+    check: 'exceptions: a day with nobody let out, not said (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: "            {t('exceptions.none')}\n", with: '' },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL a day with nobody let out'],
+  },
+  {
+    check: 'exceptions: a story read, then a let-out sent (browser)',
+    plant: { file: 'src/ExceptionsPage.jsx', anchor: '(whole) => live && setHeld({ id, whole }),', with: "(whole) => {\n        fetch(`/api/v1/garages/${garageId}/exits/${whole.exit_id}/let-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});\n        return live && setHeld({ id, whole });\n      }," },
+    before: BUILD,
+    run: ['node', 'scripts/check-exceptions.js'],
+    names: ['FAIL no write but sign-in', 'FAIL nothing sent to anything that takes money'],
+  },
+];
+
+function scratchCopy() {
+  const dir = mkdtempSync(join(tmpdir(), 'admin-control-'));
+  cpSync(ROOT, dir, { recursive: true, filter: (src) => !LEAVE_OUT.has(basename(src)) });
+  symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'dir');
+  return dir;
+}
+
+function plant(dir, plants) {
+  for (const p of [plants].flat()) plantOne(dir, p);
+}
+
+// `crlf: true` also saves the whole file with Windows line ends, after the replacement.
+function plantOne(dir, { file, anchor, with: replacement, crlf = false }) {
+  const path = join(dir, file);
+  const text = readFileSync(path, 'utf8');
+  const found = text.split(anchor).length - 1;
+  if (found !== 1) throw new Error(`${file}: the plant's anchor is there ${found} times, not once`);
+  const planted = text.replace(anchor, replacement);
+  writeFileSync(path, crlf ? planted.replace(/\r?\n/g, '\r\n') : planted);
+}
+
+const run = (dir, [cmd, ...args], env = {}) => {
+  const r = spawnSync(cmd, args, { cwd: dir, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', ...env } });
+  return { status: r.status, out: `${r.stdout}\n${r.stderr}` };
+};
+
+const args = process.argv.slice(2);
+const valueOf = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
+const KIND = args.includes('--browser') ? 'browser' : 'plain';
+const ALL = KIND === 'browser' ? BROWSER_CONTROLS : CONTROLS;
+const reportName = (i) => `fail-controls-${KIND}-shard-${i}.json`;
+
+// A shard's report names its controls; two with one name could not be told apart.
+const twice = ALL.map((c) => c.check).filter((name, at, all) => all.indexOf(name) !== at);
+if (twice.length) {
+  for (const name of new Set(twice)) console.error(`two controls are named "${name}"; a shard report could not tell them apart`);
+  process.exit(1);
+}
+
+if (args.includes('--plan')) {
+  for (const c of ALL) console.log(c.check);
+  process.exit(0);
+}
+
+if (args.includes('--verify')) {
+  const dir = valueOf('--verify');
+  const pattern = new RegExp(`^fail-controls-${KIND}-shard-\\d+\\.json$`);
+  let files = [];
+  try {
+    files = readdirSync(dir).filter((f) => pattern.test(f));
+  } catch {
+    // reported below as no shard report
+  }
+  const reports = files.map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')));
+  const wrong = [];
+  if (reports.length === 0) wrong.push(`no ${KIND} shard report in ${dir}`);
+  const of = [...new Set(reports.map((r) => r.of))];
+  if (of.length > 1) wrong.push(`the ${KIND} shard reports disagree on the shard count: ${of.join(', ')}`);
+  const n = of[0] ?? 0;
+  for (let i = 1; i <= n; i += 1) {
+    const count = reports.filter((r) => r.shard === i).length;
+    if (count !== 1) wrong.push(`shard ${i}/${n} reported ${count} times`);
+  }
+  for (const r of reports) {
+    if (r.kind !== KIND) wrong.push(`a report from shard ${r.shard}/${r.of} is of the ${r.kind} controls, not the ${KIND}`);
+    if (!(r.shard >= 1 && r.shard <= n)) wrong.push(`a report from shard ${r.shard} of ${n}`);
+  }
+  const ran = reports.flatMap((r) => r.ran);
+  for (const c of ALL) {
+    const count = ran.filter((name) => name === c.check).length;
+    if (count === 0) wrong.push(`control "${c.check}" ran in no shard`);
+    if (count > 1) wrong.push(`control "${c.check}" ran ${count} times, in shards ${reports.filter((r) => r.ran.includes(c.check)).map((r) => r.shard).join(' and ')}`);
+  }
+  for (const name of new Set(ran)) if (!ALL.some((c) => c.check === name)) wrong.push(`"${name}" ran but is not a control`);
+  for (const r of reports) for (const name of r.failed) wrong.push(`shard ${r.shard}/${r.of}: control "${name}" did not fail as required`);
+  for (const r of [...reports].sort((a, b) => a.shard - b.shard)) {
+    const seconds = Object.values(r.seconds).reduce((a, b) => a + b, 0);
+    console.log(`  shard ${r.shard}/${r.of}: ${r.ran.length} controls, ${(seconds / 60).toFixed(1)} min`);
+  }
+  if (wrong.length) {
+    for (const w of wrong) console.error(`  WRONG ${w}`);
+    console.error(`\nthe ${KIND} controls' shards do not add up to one whole run (${wrong.length} problem(s)).`);
+    process.exit(1);
+  }
+  console.log(`\nall ${ALL.length} ${KIND} controls ran exactly once over ${n} shards, each caught and named.`);
+  process.exit(0);
+}
+
+// The measured seconds, for balancing the shards and nothing else.
+const TIMES = JSON.parse(readFileSync(join(ROOT, 'scripts', 'fail-controls-times.json'), 'utf8'))[KIND];
+const longest = Math.max(...Object.values(TIMES));
+const cost = (c) => TIMES[c.check] ?? longest;
+
+/** The controls of shard `i` of `n`: longest first, each to the shard with the fewest seconds so far. */
+function shardOf(i, n) {
+  const load = Array(n).fill(0);
+  const shardAt = new Map();
+  const order = ALL.map((c, at) => ({ c, at })).sort((a, b) => cost(b.c) - cost(a.c) || a.at - b.at);
+  for (const { c } of order) {
+    const least = load.indexOf(Math.min(...load));
+    load[least] += cost(c);
+    shardAt.set(c, least + 1);
+  }
+  return ALL.filter((c) => shardAt.get(c) === i);
+}
+
+let shard = null;
+if (args.includes('--shard')) {
+  const m = /^(\d+)\/(\d+)$/.exec(valueOf('--shard') ?? '');
+  if (!m || Number(m[1]) < 1 || Number(m[1]) > Number(m[2])) {
+    console.error(`--shard takes i/N with 1 <= i <= N, not ${JSON.stringify(valueOf('--shard'))}`);
+    process.exit(1);
+  }
+  if (args.includes('--only')) {
+    console.error('--shard runs whole shards; --only is for working on one control');
+    process.exit(1);
+  }
+  shard = { i: Number(m[1]), n: Number(m[2]) };
+}
+
+// --only TEXT runs just the controls whose name holds TEXT (for working on one).
+const only = valueOf('--only');
+const controls = (shard ? shardOf(shard.i, shard.n) : ALL).filter((c) => !only || c.check.includes(only));
+if (controls.length === 0) {
+  console.error(shard ? `shard ${shard.i}/${shard.n} has no control` : `no control's name holds "${only}"`);
+  process.exit(1);
+}
+if (shard) console.log(`== ${KIND} controls, shard ${shard.i} of ${shard.n}: ${controls.length} of ${ALL.length} ==\n`);
+// A control that expects a line only the odd-text walk prints must walk it.
+const walkLine = /^(FAIL )?(odd text|F2 |F3 )/;
+const unwalked = controls.filter((c) => c.run === CHECK_DOWNLOADS && !c.oddText && c.names.some((n) => walkLine.test(n)));
+if (unwalked.length) {
+  for (const c of unwalked) console.error(`control "${c.check}" expects an odd-text line but is not marked oddText: true`);
+  process.exit(1);
+}
+const failures = [];
+const seconds = {};
+for (const c of controls) {
+  const dir = scratchCopy();
+  const started = Date.now();
+  try {
+    plant(dir, c.plant);
+    for (const step of c.before ?? []) {
+      const r = run(dir, step);
+      if (r.status !== 0) throw new Error(`could not prepare: ${step.join(' ')}\n${r.out}`);
+    }
+    const r = run(dir, c.run === CHECK_DOWNLOADS && !c.oddText ? [...c.run, '--without-odd-text'] : c.run, c.env);
+    const missing = c.names.filter((n) => !r.out.includes(n));
+    const ok = r.status !== 0 && missing.length === 0;
+    const where = [c.plant].flat().map((p) => p.file).join(' + ');
+    console.log(`  ${ok ? 'ok  ' : 'FAIL'} check ${c.check}: planted in ${where} -> exit ${r.status}`);
+    if (ok) {
+      for (const n of c.names) console.log(`         named: ${n}`);
+    } else {
+      failures.push(c.check);
+      if (r.status === 0) console.log('         the check PASSED with the break planted');
+      for (const n of missing) console.log(`         did not name: ${n}`);
+      console.log(r.out.split('\n').slice(-25).join('\n'));
+    }
+  } catch (error) {
+    failures.push(c.check);
+    console.log(`  FAIL check ${c.check}: ${error.message}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    seconds[c.check] = Math.round((Date.now() - started) / 100) / 10;
+  }
+}
+
+if (shard) {
+  const ran = controls.map((c) => c.check);
+  const report = { kind: KIND, shard: shard.i, of: shard.n, ran, failed: failures, seconds };
+  writeFileSync(join(ROOT, reportName(shard.i)), `${JSON.stringify(report, null, 1)}\n`);
+}
+
+if (failures.length) {
+  console.error(`\n${failures.length} of ${controls.length} controls did not fail as required.`);
+  process.exit(1);
+}
+console.log(`\nfail-controls — ${controls.length} of ${controls.length} breaks were caught, each named.`);

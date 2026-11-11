@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+# Screenshots and browser-check output; never tracked.
+.screens/
+test-results/
+# A fail-controls shard's report, read by --verify in CI.
+fail-controls-*-shard-*.json
+__pycache__/
