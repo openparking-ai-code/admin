@@ -1382,7 +1382,7 @@ const CONTROLS = [
     check: "a shard's report back on always(), after check-environment",
     plant: { file: '.github/workflows/ci.yml', anchor: "if: \"!cancelled() && steps.environment.outcome == 'success'\"\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard", with: "if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard" },
     run: CHECK_CACHE_ORDER,
-    names: ['FAIL workflows/ci.yml, job "controls", step 4 "This shard\'s report": runs under "always()"', 'the one form allowed is "!cancelled() && steps.environment.outcome == \'success\'"'],
+    names: ['FAIL workflows/ci.yml, job "controls", step 5 "This shard\'s report": runs under "always()"', 'the one form allowed is "!cancelled() && steps.environment.outcome == \'success\'"'],
   },
   {
     check: '|| true in the npm verify line and its pinned step both',
