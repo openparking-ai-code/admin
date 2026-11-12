@@ -6,8 +6,8 @@
 //   cheapest   "When more than one price applies, the car always pays the
 //              cheapest." -- by the caps (right after Max per week) and by
 //              the special rates (above the list);
-//   longest    "Stays longer than 90 days can't be priced automatically; they
-//              need an operator." -- in the same two places, its days from
+//   longest    "Stays longer than 90 days in a row aren't accepted." -- in
+//              the same two places, its days from
 //              LONGEST_STAY_DAYS (src/rates.js); in each box the second
 //              sentence 6 px under the first;
 //   calculator a stay of exactly 90 days priced; a minute more: that sentence

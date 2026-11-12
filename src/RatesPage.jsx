@@ -760,7 +760,7 @@ function BoxName({ t, name }) {
  * The two rules of rate setup (decided 2026-10-16), said by the caps and by
  * the special rates (`where`): when more than one price applies, the car
  * always pays the cheapest; and a stay longer than the rate engine prices
- * (LONGEST_STAY_DAYS) needs an operator.
+ * (LONGEST_STAY_DAYS) is not accepted.
  */
 function RateRules({ t, where }) {
   return (
@@ -1115,7 +1115,7 @@ const TOO_LONG = 'rates.rule.longest';
 /**
  * Why a stay typed in is not priced, as its sentence's key, or null: a time
  * missing, left before it came in, or longer than the rate engine prices
- * (LONGEST_STAY_DAYS) -- that one needs an operator, and nothing is sent.
+ * (LONGEST_STAY_DAYS) -- that one is not accepted, and nothing is sent.
  */
 function notPriced(entry, exit, timeZone) {
   if (!wallOf(entry) || !wallOf(exit)) return 'rates.try.need';

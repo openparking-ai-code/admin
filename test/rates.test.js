@@ -256,13 +256,15 @@ test('the rules of rate setup, in both languages: the cheapest price wins, and n
   assert.equal(LONGEST_STAY_DAYS, 90, 'the longest stay the engine prices: 90 days (decided 2026-10-16)');
   // The words as decided (2026-10-16), and in Spanish.
   assert.equal(translate('en', 'rates.rule.cheapest'), 'When more than one price applies, the car always pays the cheapest.');
-  assert.equal(translate('en', 'rates.rule.longest', { days: LONGEST_STAY_DAYS }), "Stays longer than 90 days can't be priced automatically; they need an operator.");
+  assert.equal(translate('en', 'rates.rule.longest', { days: LONGEST_STAY_DAYS }), "Stays longer than 90 days in a row aren't accepted.");
   assert.equal(translate('es', 'rates.rule.cheapest'), 'Cuando se aplica más de un precio, el auto siempre paga el más barato.');
-  assert.equal(translate('es', 'rates.rule.longest', { days: LONGEST_STAY_DAYS }), 'Las estadías de más de 90 días no tienen precio automático; necesitan un operador.');
+  assert.equal(translate('es', 'rates.rule.longest', { days: LONGEST_STAY_DAYS }), 'No se aceptan estadías de más de 90 días seguidos.');
   // The days come from LONGEST_STAY_DAYS alone: neither language writes a number of its own.
   for (const language of ['en', 'es']) {
     const words = DICTIONARIES[language]['rates.rule.longest'];
     assert.ok(words.includes('{days}') && !/\d/.test(words), `${language}: rates.rule.longest fills in {days} and has no number of its own: ${words}`);
+    // The engine's refusal of such a stay says the same sentence.
+    assert.equal(DICTIONARIES[language]['rates.finding.GAP_STAY_LONGER_THAN_MAX_STAY'], words, `${language}: the engine's refusal of a stay too long says the rule's own words`);
   }
 });
 

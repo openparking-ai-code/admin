@@ -237,7 +237,8 @@
     "extras: a page naming a group the file does not name is drawn": 1,
     "extras: a group list longer than allowed gives groups": 1,
     "extras: a group with no name in both languages is kept": 1,
-    "extras: any address names a menu page": 1
+    "extras: any address names a menu page": 1,
+    "the screens' longest stay differs from the engine's": 1
   },
   "browser": {
     "6 no request leaves the page": 57,

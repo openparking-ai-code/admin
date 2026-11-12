@@ -1382,7 +1382,10 @@ const CONTROLS = [
     check: "a shard's report back on always(), after check-environment",
     plant: { file: '.github/workflows/ci.yml', anchor: "if: \"!cancelled() && steps.environment.outcome == 'success'\"\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard", with: "if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: fail-controls-plain-shard" },
     run: CHECK_CACHE_ORDER,
-    names: ['FAIL workflows/ci.yml, job "controls", step 5 "This shard\'s report": runs under "always()"', 'the one form allowed is "!cancelled() && steps.environment.outcome == \'success\'"'],
+    // The step number is left out on purpose: a copy of this workflow may have a
+    // read-access step after checkout or not, so the report is step 5 or step 4.
+    // Both halves of the sentence must still be named.
+    names: ['FAIL workflows/ci.yml, job "controls", step ', ' "This shard\'s report": runs under "always()"', 'the one form allowed is "!cancelled() && steps.environment.outcome == \'success\'"'],
   },
   {
     check: '|| true in the npm verify line and its pinned step both',
@@ -1663,6 +1666,12 @@ const CONTROLS = [
     plant: { file: 'scripts/check-finding-codes.js', anchor: '  const engineCodes = readEngineCodes(src);', with: "  const engineCodes = [...readEngineCodes(src), 'GAP_A_CODE_THE_ENGINE_GAINED'];" },
     run: ['node', 'scripts/check-finding-codes.js'],
     names: ['FAIL GAP_A_CODE_THE_ENGINE_GAINED: the engine can return it'],
+  },
+  {
+    check: "the screens' longest stay differs from the engine's",
+    plant: { file: 'src/rates.js', anchor: 'export const LONGEST_STAY_DAYS = 90;', with: 'export const LONGEST_STAY_DAYS = 91;' },
+    run: ['node', 'scripts/check-finding-codes.js'],
+    names: ['FAIL LONGEST_STAY_DAYS is 91; the engine at the pin refuses stays over 90 days'],
   },
   // ── the price table's "most" rows (F1), every typed date (F5), the cheaper way in words (E1) ──
   // ── the cheaper-way words whatever else applied (G2), the most at equality (G3) ──
@@ -2013,7 +2022,7 @@ const CONTROLS = [
   },
   {
     check: "rules: the Spanish longest stay with a number of its own",
-    plant: { file: "src/i18n/es.js", anchor: "  \"rates.rule.longest\": \"Las estadías de más de {days} días", with: "  \"rates.rule.longest\": \"Las estadías de más de 90 días" },
+    plant: { file: "src/i18n/es.js", anchor: "  \"rates.rule.longest\": \"No se aceptan estadías de más de {days} días", with: "  \"rates.rule.longest\": \"No se aceptan estadías de más de 90 días" },
     run: ["node", "--test", "test/rates.test.js"],
     names: ["the rules of rate setup, in both languages"],
   },

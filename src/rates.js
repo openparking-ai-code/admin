@@ -982,12 +982,13 @@ export const wallPlus = (wall, minutes, timeZone) => wallAt(instantOf(wall, time
 
 /**
  * The longest stay the rate engine prices, in days (decided 2026-10-16). A
- * longer stay can't be priced automatically: it needs an operator. The one
+ * longer stay in a row is not accepted. The one
  * number for it on these screens: the Rates page says it by the caps and by
  * the special rates (`rates.rule.longest`, its {days} from here), and its
- * calculators price no stay longer. The engine refuses a longer stay from the
- * version that sets the limit; when rate-engine.pin moves to it, the two must
- * be equal.
+ * calculators price no stay longer. The engine refuses a longer stay
+ * (MAX_STAY_DAYS), and scripts/check-finding-codes.js fails unless the two are
+ * equal; the engine's refusal, GAP_STAY_LONGER_THAN_MAX_STAY, says the same
+ * sentence with the same {days}.
  */
 export const LONGEST_STAY_DAYS = 90;
 
@@ -1231,6 +1232,7 @@ export const FINDING_CODES = [
   'GAP_UNDECLARED_SPACE_CLASS',
   'GAP_NO_ACCUMULATE_RULE',
   'GAP_STAY_EXCEEDS_MAX_DURATION',
+  'GAP_STAY_LONGER_THAN_MAX_STAY',
   'GAP_NO_PLAN_IN_FORCE_AT_ENTRY',
   'GAP_NO_TAX_SET_IN_FORCE',
   'GAP_NO_OCCUPANCY_AT_ENTRY',
@@ -1268,7 +1270,7 @@ export function findingWords(t, finding, plan, timeZone, language) {
     const minutes = Math.round((Date.parse(probe.exit_at) - Date.parse(probe.entry_at)) / 60000);
     car = t('rates.finding.car', { day: dayName(weekdayOf(entry.slice(0, 10)), language), time: clockWords(entry.slice(11), language), length: lengthWords(t, minutes) });
   }
-  return [t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');
+  return [t(findingKey(finding.code), { days: LONGEST_STAY_DAYS }), about, car].filter(Boolean).join(' ');
 }
 
 const RULE_NAMES = { increment: 1, daily_max: 1, weekly_max: 1, grace: 1, fill_level: 1 };
