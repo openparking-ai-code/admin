@@ -2,11 +2,22 @@ name: CI
 
 on:
   pull_request:
+    # ready_for_review is listed because the heavy jobs below skip draft pull
+    # requests: marking one ready runs everything, and so does every push to it
+    # after that. Drafts cannot be merged.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
 permissions:
   contents: read
+
+# A newer push to the same pull request stops this workflow's older run on
+# it: that commit can no longer be merged. Runs on main are never stopped or
+# replaced: each has a group of its own (its commit).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -122,6 +133,8 @@ jobs:
 
   controls:
     name: controls (${{ matrix.shard }}/6)
+    # Skipped on a draft pull request (see `on:`); runs on every other one and on main.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # Every check above, shown failing first: each control plants one break
     # in a scratch copy of the repository and requires the check to fail and
     # name it. The controls are spread over 6 runners by their measured
@@ -163,7 +176,8 @@ jobs:
     # missing, none twice, none that did not fail as required -- and names
     # what does not.
     name: test
-    if: always()
+    # On a draft its controls are skipped, so it is too.
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [checks, controls]
     runs-on: ubuntu-24.04
     # Measured: the slowest run of this job, about twice over. A hang stops here, not at GitHub's 6 hours.
@@ -278,6 +292,8 @@ jobs:
 
   browser-controls:
     name: browser-controls (${{ matrix.shard }}/20)
+    # Skipped on a draft pull request (see `on:`); runs on every other one and on main.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # The browser checks, shown failing first. Copies, each with one break,
     # must each fail naming it: an outside font link, a raw code let through,
     # the clear skipped on sign-out, an inline script, the browser's time zone
@@ -318,7 +334,8 @@ jobs:
   browser:
     # The name branch protection requires; as `test` above, for the browser.
     name: browser
-    if: always()
+    # On a draft its controls are skipped, so it is too.
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [browser-checks, browser-controls]
     runs-on: ubuntu-24.04
     # Measured: the slowest run of this job, about twice over. A hang stops here, not at GitHub's 6 hours.

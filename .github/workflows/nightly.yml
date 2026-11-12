@@ -1,6 +1,6 @@
 name: Nightly fail-controls
 
-# The repository-wide fail-controls, on main, once a night, and nothing else:
+# The repository-wide fail-controls, on main, once a week, and nothing else:
 # ci.yml's `controls` (6 shards) and `browser-controls` (20 shards), with the
 # same commands and shards, without the checks they control. What each control
 # breaks is listed in scripts/fail-controls.js. `same-controls` is red when
@@ -10,8 +10,9 @@ name: Nightly fail-controls
 
 on:
   schedule:
-    # 02:47 UTC every night.
-    - cron: '47 2 * * *'
+    # 02:47 UTC every Monday. Once a week, not every night: each run is about
+    # 320 runner minutes, and every pull request runs the same controls.
+    - cron: '47 2 * * 1'
   workflow_dispatch:
 
 permissions:
