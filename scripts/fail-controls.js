@@ -1644,7 +1644,7 @@ const CONTROLS = [
   },
   {
     check: "a finding shown in the engine's words",
-    plant: { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');" },
+    plant: { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code), { days: LONGEST_STAY_DAYS }), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code), { days: LONGEST_STAY_DAYS }), about, car].filter(Boolean).join(' ');" },
     run: ['node', '--test', 'test/rates.test.js'],
     names: ["the engine's own sentence reached the screen"],
   },
@@ -3447,7 +3447,7 @@ const BROWSER_CONTROLS = [
     check: "a finding shown in the engine's words, in a browser",
     plant: [
       { file: 'src/api.js', anchor: '          code: f.code,\n', with: '          code: f.code,\n          text: f.text,\n' },
-      { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code)), about, car].filter(Boolean).join(' ');" },
+      { file: 'src/rates.js', anchor: "  return [t(findingKey(finding.code), { days: LONGEST_STAY_DAYS }), about, car].filter(Boolean).join(' ');", with: "  return [finding.text ?? t(findingKey(finding.code), { days: LONGEST_STAY_DAYS }), about, car].filter(Boolean).join(' ');" },
     ],
     before: BUILD,
     run: ['node', 'scripts/check-rates.js'],
